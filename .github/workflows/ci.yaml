@@ -32,7 +32,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - run: cargo test
+      - id: attest
+        uses: ./
+      - if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+        run: cargo test
       - run: make conformance
 
   # Conformance drives verify.sh directly and therefore proves nothing about
