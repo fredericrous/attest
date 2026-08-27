@@ -32,7 +32,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - run: cargo test
+      - id: attest
+        uses: ./
+      - if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+        run: cargo test
       - run: make conformance
 
   # Conformance drives verify.sh directly and therefore proves nothing about
@@ -82,7 +85,10 @@ jobs:
           printf 'amont-attest-v2\ntree %s\ngates pre-push-cargo-test pre-push-clippy\nplatform x86_64-linux\namont ci\n' \
             "$tree" > /tmp/p
           ssh-keygen -Y sign -n amont-attest -f /tmp/k /tmp/p
-          git notes --ref amont-attest add \
+          # `-f`: the fail-open step above already fetched the real notes ref,
+          # which may well hold a (macOS, hence uncovering) note for this very
+          # tree. Overwrite it rather than refusing to add.
+          git notes --ref amont-attest add -f \
             -m "$(printf '%s\n\n%s' "$(cat /tmp/p)" "$(cat /tmp/p.sig)")" "$tree"
       - id: signed
         uses: ./
