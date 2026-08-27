@@ -117,8 +117,9 @@ if [ -z "$signers" ]; then
 elif [ "${signers#/}" = "$signers" ]; then
     signers=$root/$signers
 fi
-[ -n "$signers" ] && [ -f "$signers" ] || uncovered \
-    "no allowed_signers (looked for .forgejo/ and .github/allowed_signers at $root)"
+if [ -z "$signers" ] || [ ! -f "$signers" ]; then
+    uncovered "no allowed_signers (looked for .forgejo/ and .github/allowed_signers at $root)"
+fi
 
 # The identity to verify as. `ssh-keygen -Y verify` REQUIRES one and checks it
 # against the principal column, so a wrong value rejects a perfectly good

@@ -40,12 +40,15 @@ outputs:
   gates:
     description: >-
       The covered gate names as a JSON array — `[]` when nothing is covered.
-      USE THIS ONE:
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
-      `contains` over an array matches ELEMENTS. Over the `covered` string
+      USE THIS ONE, in an `if:` expression:
+      "not contains(fromJSON(steps.attest.outputs.gates), 'your-gate')".
+      `contains` over an array matches ELEMENTS; over the `covered` string
       below it matches substrings, so an unrelated gate named
-      `pre-push-cargo-test-slow` satisfies a check for `pre-push-cargo-test`
-      and skips the real suite.
+      `pre-push-cargo-test-slow` would satisfy a check for
+      `pre-push-cargo-test` and skip the real suite. See the README for the
+      expression written out — it cannot be spelled here, because GitHub
+      EVALUATES a dollar-brace expression inside this description rather than
+      displaying it, and the action then fails to load.
     value: ${{ steps.verify.outputs.gates }}
   covered:
     description: >-
