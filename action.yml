@@ -1,0 +1,77 @@
+# Verify a signed attestation, so a CI job can skip work that already ran.
+#
+# Composite, and deliberately WITHOUT a download step. The contract here is
+# fail-open — every failure means "run the tests" — so a step that fetched a
+# binary would turn a flaky network into a silently disabled gate. Everything
+# below needs only `git` and `ssh-keygen`, which every runner already has.
+#
+# Forgejo uses the same file: `uses: https://github.com/fredericrous/attest@v1`.
+# Forgejo Actions sets the same GITHUB_* variables this relies on.
+name: attest
+description: Skip a CI job when a signed note proves its gate already passed on this exact tree
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  signers:
+    description: >-
+      Path to an allowed_signers file, relative to the repository root.
+      Default: .forgejo/allowed_signers, then .github/allowed_signers.
+    required: false
+    default: ""
+  principal:
+    description: >-
+      Identity to verify against. Default: the first principal named in the
+      signers file — which is almost always what you want, and is the setting
+      that used to be hardcoded to a placeholder and silently broke everything.
+    required: false
+    default: ""
+  platform:
+    description: >-
+      Only accept an attestation minted on this platform, as <arch>-<os>
+      (e.g. x86_64-linux). Default: the runner this step is on, so a matrix leg
+      skips only work that really ran on its own platform. Pass `any` to state
+      that the suite's result does not depend on where it ran.
+    required: false
+    default: ""
+
+outputs:
+  gates:
+    description: >-
+      The covered gate names as a JSON array — `[]` when nothing is covered.
+      USE THIS ONE:
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+      `contains` over an array matches ELEMENTS. Over the `covered` string
+      below it matches substrings, so an unrelated gate named
+      `pre-push-cargo-test-slow` satisfies a check for `pre-push-cargo-test`
+      and skips the real suite.
+    value: ${{ steps.verify.outputs.gates }}
+  covered:
+    description: >-
+      The same names, space-separated. Kept only so workflows written against
+      the older inline templates keep working; prefer `gates`.
+    value: ${{ steps.verify.outputs.covered }}
+
+runs:
+  using: composite
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        ATTEST_SIGNERS: ${{ inputs.signers }}
+        ATTEST_PRINCIPAL: ${{ inputs.principal }}
+        ATTEST_PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -u
+        # Positional parameters rather than a bash array: macOS runners can
+        # still put bash 3.2 first on PATH, where an empty array under `set -u`
+        # is an error. `"$@"` is exempt from nounset in every POSIX shell.
+        set --
+        if [ -n "$ATTEST_SIGNERS" ];   then set -- "$@" --signers   "$ATTEST_SIGNERS";   fi
+        if [ -n "$ATTEST_PRINCIPAL" ]; then set -- "$@" --principal "$ATTEST_PRINCIPAL"; fi
+        if [ -n "$ATTEST_PLATFORM" ];  then set -- "$@" --platform  "$ATTEST_PLATFORM";  fi
+        # Reasons go to stderr and land in the job log. When an expected skip
+        # does not happen, that log says which of tree, platform, signature or
+        # signers was the reason — the alternative is a silent non-answer.
+        bash "$GITHUB_ACTION_PATH/verify.sh" --github-output "$@" >> "$GITHUB_OUTPUT"

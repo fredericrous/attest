@@ -1,0 +1,13 @@
+# The toolchain this repository BUILDS with, pinned.
+#
+# CI runs clippy under `-D warnings`, where every upstream release is a
+# potential breaking change: a lint added in a new stable turns an untouched,
+# already-merged commit red on a scheduled run with no commit to blame. The pin
+# is what makes a red build attributable to a change somebody made.
+#
+# NOT the MSRV. The floor the source may require is `rust-version` in
+# Cargo.toml, and CI's `msrv` job is what proves that floor is real. The two
+# numbers move independently and mean different things.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

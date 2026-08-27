@@ -1,0 +1,39 @@
+[package]
+name = "git-attest"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/fredericrous/attest"
+authors = ["Frederic Rousseau"]
+description = "Verify a signed attestation that a test suite already passed on this exact tree, so CI can skip it"
+readme = "README.md"
+keywords = ["ci", "attestation", "git-notes", "ssh-signature", "hooks"]
+categories = ["development-tools", "command-line-utilities"]
+
+# MEASURED against `cargo +<v> check --locked`, not inherited and not guessed.
+# There are no dependencies to drag it upward, which is the point: this is the
+# floor of the language features the source actually uses.
+rust-version = "1.74.0"
+
+[[bin]]
+name = "git-attest"
+path = "src/main.rs"
+
+# NO DEPENDENCIES, and this is load-bearing rather than an aesthetic.
+#
+# A verifier is a security boundary: it decides whether a test suite may be
+# skipped. Everything it links is something a reviewer has to trust, and
+# something an advisory can force a release for. The two hard problems here —
+# ed25519 and the OpenSSH signature envelope — are solved by `ssh-keygen`,
+# which is already on every runner and is audited by people who do that for a
+# living. Hand-rolling either, or pulling a crate that does, would be strictly
+# worse than shelling out.
+#
+# `verify.sh` makes the same bet in the same words, and `tests/conformance.sh`
+# is what proves the two agree.
+[dependencies]
+
+[profile.release]
+strip = true
+opt-level = "s"
+lto = true

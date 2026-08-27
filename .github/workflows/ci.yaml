@@ -1,0 +1,129 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # the pinned toolchain means a red build is attributable
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: shellcheck verify.sh tests/*.sh
+
+  # The fixtures, against BOTH implementations, on every platform the format
+  # names. macOS matters specifically: it is the platform most attestations are
+  # produced on, and the one where `bash` may be 3.2.
+  conformance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test
+      - run: make conformance
+
+  # Conformance drives verify.sh directly and therefore proves nothing about
+  # the action wrapped around it — inputs, $GITHUB_OUTPUT, output plumbing.
+  # This job is the only thing that does.
+  action:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. Fail-open, which is the property that matters most: this repository
+      #    carries no attestation, so the action must report nothing covered
+      #    and must not fail the job.
+      - id: bare
+        uses: ./
+      - name: nothing covered, and the step succeeded
+        run: |
+          set -eu
+          [ "${{ steps.bare.outputs.gates }}" = "[]" ] || {
+            echo "expected [], got: ${{ steps.bare.outputs.gates }}"; exit 1; }
+          [ -z "${{ steps.bare.outputs.covered }}" ] || {
+            echo "expected empty covered"; exit 1; }
+
+      # 2. Now mint a real attestation over the tree this job checked out, and
+      #    prove the action finds, verifies and reports it.
+      - name: sign this exact tree
+        run: |
+          set -eu
+          ssh-keygen -q -t ed25519 -N '' -C ci@example.org -f /tmp/k
+          printf '%s namespaces="amont-attest" %s\n' ci@example.org "$(cat /tmp/k.pub)" \
+            > .github/ci-signers
+          tree=$(git rev-parse 'HEAD^{tree}')
+          printf 'amont-attest-v2\ntree %s\ngates pre-push-cargo-test pre-push-clippy\nplatform x86_64-linux\namont ci\n' \
+            "$tree" > /tmp/p
+          ssh-keygen -Y sign -n amont-attest -f /tmp/k /tmp/p
+          git notes --ref amont-attest add \
+            -m "$(printf '%s\n\n%s' "$(cat /tmp/p)" "$(cat /tmp/p.sig)")" "$tree"
+      - id: signed
+        uses: ./
+        with:
+          signers: .github/ci-signers
+      - name: the attestation is reported, exactly
+        run: |
+          set -eu
+          got='${{ steps.signed.outputs.gates }}'
+          want='["pre-push-cargo-test","pre-push-clippy"]'
+          [ "$got" = "$want" ] || { echo "want $want, got $got"; exit 1; }
+
+      # 3. The skip condition readers will copy, both directions.
+      - name: a covered gate is skipped
+        if: ${{ contains(fromJSON(steps.signed.outputs.gates), 'pre-push-cargo-test') }}
+        run: echo "correctly identified as covered"
+      - name: an uncovered gate still runs
+        if: ${{ !contains(fromJSON(steps.signed.outputs.gates), 'pre-push-audit-rust') }}
+        run: echo "correctly identified as NOT covered"
+
+      # 4. The substring bug this project exists to fix. `pre-push-cargo-test`
+      #    is a substring of the covered `…-slow`, so the old string form would
+      #    skip the real suite here. Array membership must not.
+      - name: re-sign with only a prefix-colliding gate
+        run: |
+          set -eu
+          tree=$(git rev-parse 'HEAD^{tree}')
+          printf 'amont-attest-v2\ntree %s\ngates pre-push-cargo-test-slow\nplatform x86_64-linux\namont ci\n' \
+            "$tree" > /tmp/p2
+          ssh-keygen -Y sign -n amont-attest -f /tmp/k /tmp/p2
+          git notes --ref amont-attest add -f \
+            -m "$(printf '%s\n\n%s' "$(cat /tmp/p2)" "$(cat /tmp/p2.sig)")" "$tree"
+      - id: collide
+        uses: ./
+        with:
+          signers: .github/ci-signers
+      - name: a merely-prefix-matching gate does NOT count as covered
+        run: |
+          set -eu
+          [ '${{ steps.collide.outputs.gates }}' = '["pre-push-cargo-test-slow"]' ] || exit 1
+          # the legacy string form WOULD have matched — that is the defect:
+          case '${{ steps.collide.outputs.covered }}' in
+            *pre-push-cargo-test*) echo "substring match, as expected of the old form" ;;
+          esac
+      - name: and the array form correctly says it is not covered
+        if: ${{ !contains(fromJSON(steps.collide.outputs.gates), 'pre-push-cargo-test') }}
+        run: echo "the real suite would still run — correct"
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          v=$(awk -F'"' '/^rust-version/ {print $2}' Cargo.toml)
+          rustup toolchain install "$v" --profile minimal
+          cargo "+$v" check --locked

@@ -1,0 +1,130 @@
+# Tag-driven release.
+#
+# The trigger is `v*.*.*` — three parts, deliberately. The moving major alias
+# (`v1`) that `uses:` pins to must NOT start a release run, or every alias move
+# would re-run a publish against an immutable registry.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Nothing is published before the tag and the manifest agree. A mismatch here
+  # is the failure that cannot be undone afterwards: crates.io versions are
+  # immutable, so a wrong number can only be superseded.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -eu
+          tag=${GITHUB_REF#refs/tags/v}
+          manifest=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag v$tag but Cargo.toml says $manifest" >&2
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+      - run: make check
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin,       os: macos-latest }
+          - { target: x86_64-apple-darwin,        os: macos-latest }
+          - { target: x86_64-unknown-linux-gnu,   os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu,  os: ubuntu-latest }
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest }
+          - { target: x86_64-pc-windows-msvc,     os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - name: cross toolchain
+        if: ${{ matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-unknown-linux-musl' }}
+        run: |
+          set -eu
+          sudo apt-get update
+          if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y musl-tools
+          fi
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: archive
+        run: |
+          set -eu
+          name=git-attest-${{ needs.guard.outputs.version }}-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          if [ "${{ matrix.os }}" = windows-latest ]; then
+            cp "target/${{ matrix.target }}/release/git-attest.exe" "dist/$name/"
+          else
+            cp "target/${{ matrix.target }}/release/git-attest" "dist/$name/"
+          fi
+          cp README.md LICENSE SPEC.md "dist/$name/"
+          tar czf "dist/$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art, merge-multiple: true }
+      - run: cd art && sha256sum ./*.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            art/*.tar.gz
+            art/SHA256SUMS
+          generate_release_notes: true
+
+  publish-crates:
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # `uses: fredericrous/attest@v1` is how an action is pinned, so the major
+  # alias has to follow the releases. This is the one tag that legitimately
+  # moves — it is a pointer, not a release identity, and the `v*.*.*` trigger
+  # above means moving it publishes nothing and starts no run.
+  move-major-alias:
+    needs: [publish, publish-crates]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: |
+          set -eu
+          major=v$(echo "${{ needs.guard.outputs.version }}" | cut -d. -f1)
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -f "$major" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$major"
+          # Verify the EFFECT, not the exit code.
+          remote=$(git ls-remote origin "refs/tags/$major" | cut -f1)
+          [ -n "$remote" ] || { echo "alias $major did not reach origin" >&2; exit 1; }
+          echo "$major -> $remote"
