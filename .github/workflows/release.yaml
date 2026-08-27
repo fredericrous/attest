@@ -132,14 +132,26 @@ jobs:
   # moves — it is a pointer, not a release identity, and the `v*.*.*` trigger
   # above means moving it publishes nothing and starts no run.
   move-major-alias:
-    needs: [publish, publish-crates]
+    # `guard` is in `needs` for its OUTPUT, not its ordering: the `needs`
+    # context exposes only the jobs a job declares, so reading
+    # needs.guard.outputs.version without listing `guard` yields an empty
+    # string — which silently produced a tag literally named `v`.
+    needs: [guard, publish, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - run: |
           set -eu
-          major=v$(echo "${{ needs.guard.outputs.version }}" | cut -d. -f1)
+          version="${{ needs.guard.outputs.version }}"
+          # Refuse rather than invent. An empty version here previously became
+          # the tag `v`; a release that cannot name its own major is a bug, not
+          # something to paper over.
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "guard produced no usable version: '$version'" >&2; exit 1 ;;
+          esac
+          major=v${version%%.*}
           git config user.name github-actions
           git config user.email github-actions@github.com
           git tag -f "$major" "$GITHUB_SHA"
