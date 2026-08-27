@@ -98,12 +98,32 @@ jobs:
             art/SHA256SUMS
           generate_release_notes: true
 
+  # crates.io is OPTIONAL here, and the job says so rather than failing.
+  #
+  # The primary artifact of this repository is the action, which is consumed by
+  # `uses:` and needs no registry at all. Wiring the release so a missing
+  # CARGO_REGISTRY_TOKEN takes the whole release down would hold the action
+  # hostage to a distribution channel nobody has asked for yet.
+  #
+  # To enable it: `gh secret set CARGO_REGISTRY_TOKEN --repo fredericrous/attest`.
   publish-crates:
     needs: [guard, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo publish --locked
+      - id: token
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "have=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::no CARGO_REGISTRY_TOKEN — skipping crates.io"
+          fi
+      - if: steps.token.outputs.have == 'yes'
+        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
