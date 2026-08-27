@@ -62,6 +62,10 @@ jobs:
       - name: sign this exact tree
         run: |
           set -eu
+          # `git notes add` writes an object and needs a committer identity;
+          # a bare runner has none.
+          git config user.email ci@example.org
+          git config user.name CI
           ssh-keygen -q -t ed25519 -N '' -C ci@example.org -f /tmp/k
           printf '%s namespaces="amont-attest" %s\n' ci@example.org "$(cat /tmp/k.pub)" \
             > .github/ci-signers
