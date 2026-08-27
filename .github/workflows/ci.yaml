@@ -62,6 +62,19 @@ jobs:
       - name: sign this exact tree
         run: |
           set -eu
+          # `git notes add` writes an object and needs a committer identity;
+          # a bare runner has none.
+          git config user.email ci@example.org
+          git config user.name CI
+          # Drop origin first. The verifier force-fetches refs/notes/amont-attest
+          # before reading it, which would replace the note minted below with
+          # whatever the remote holds — and this repository really does carry
+          # one, written by amont when this branch was pushed from a Mac. That
+          # is correct behaviour (CI wants the remote's note, not a local one)
+          # and it is precisely what makes a locally-seeded fixture unusable
+          # here. Without a remote the fetch fails harmlessly, as it does in
+          # any repository that has never pushed an attestation.
+          git remote remove origin
           ssh-keygen -q -t ed25519 -N '' -C ci@example.org -f /tmp/k
           printf '%s namespaces="amont-attest" %s\n' ci@example.org "$(cat /tmp/k.pub)" \
             > .github/ci-signers
