@@ -67,6 +67,14 @@ you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
 actually passed. Any tool can produce one — [`SPEC.md`](SPEC.md) is the format,
 and it is short.
 
+An attestation is only as honest as the push that produced it, and the way a
+push gets dishonest in practice is a coding agent masking its failure —
+`git push … 2>&1 | tail -5` reports tail's exit status, so a rejected push
+reads as success. [amont-agent](https://github.com/fredericrous/amont-agent)
+guards that end: a `PreToolUse` hook that refuses the command shape before it
+runs. Independent of this verifier — related by author, and by the shared
+conviction: trust what was verified, never what was reported.
+
 ## What is in here
 
 | | |
