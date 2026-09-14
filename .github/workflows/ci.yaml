@@ -262,7 +262,10 @@ jobs:
         run: |
           set -eu
           [ '${{ steps.fpinput.outputs.gates }}' = '[]' ] || { echo 'got: ${{ steps.fpinput.outputs.gates }}'; exit 1; }
+          # Back to the original tree, and without the fingerprint-keyed
+          # block: the steps below reason about the tree key alone.
           git reset -q --hard HEAD~2
+          git update-ref -d refs/notes/amont-attest-inputs
 
       # 6. The substring bug this project exists to fix. `pre-push-cargo-test`
       #    is a substring of the covered `…-slow`, so the old string form would
