@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.1
 
 Three findings from a review of 1.3.0, all with fixtures now.
 
