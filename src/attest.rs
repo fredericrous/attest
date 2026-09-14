@@ -1,11 +1,9 @@
 //! The verifier: given a repository and an `allowed_signers`, what does a
 //! valid attestation cover for the tree checked out here?
 //!
-//! This is the consumer half of the format `amont` produces at pre-push. The
-//! producer — key handling, signing, pushing the notes ref — deliberately
-//! stays there: it needs the gate names only amont's dispatcher knows. What
-//! travels is a signed document, and reading a signed document is the part
-//! every other repository needs.
+//! This is the consumer half of the format `amont` produces at pre-push and
+//! `sign/sign.sh` produces in CI. What travels is a signed document, and
+//! reading a signed document is the part every other repository needs.
 //!
 //! `SPEC.md` is the contract; this file and `verify.sh` are two
 //! implementations of it, kept honest by `tests/conformance.sh`.
@@ -34,6 +32,13 @@ pub const NOTES_REF: &str = "amont-attest";
 /// pinned to this namespace accepts nothing else.
 pub const NAMESPACE: &str = "amont-attest";
 
+/// How many blocks of one note are read. Every block costs two `ssh-keygen`
+/// runs, and the notes ref is writable by anyone with push access.
+pub const MAX_BLOCKS: usize = 32;
+
+const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----";
+const END: &str = "-----END SSH SIGNATURE-----";
+
 /// Where a suite ran, as `<arch>-<os>`. Coarser than a target triple on
 /// purpose: the libc flavour is not something `std` can answer, and the
 /// question a CI matrix actually asks is "did this run on MY leg".
@@ -49,25 +54,22 @@ pub fn platform() -> String {
 /// reasons out of the same code path that made the decision is what keeps
 /// `explain` from becoming a second, drifting implementation of `covered`.
 pub struct Verdict {
-    pub gates: Option<Vec<String>>,
+    /// Covered gate names, first-appearance order, no duplicates. Empty means
+    /// nothing is covered.
+    pub gates: Vec<String>,
     pub trail: Vec<String>,
 }
 
 impl Verdict {
     fn nothing(reason: impl Into<String>) -> Self {
         Verdict {
-            gates: None,
+            gates: Vec::new(),
             trail: vec![reason.into()],
         }
     }
 }
 
 /// Record a reason, unless it repeats the one before it.
-///
-/// A producer writes its note to BOTH the tree and the commit, so the
-/// candidate loop below meets the same note twice and would otherwise report
-/// every rejection twice — which reads like two separate problems rather than
-/// one seen from two angles.
 fn push_reason(trail: &mut Vec<String>, reason: String) {
     if trail.last() != Some(&reason) {
         trail.push(reason);
@@ -94,7 +96,9 @@ impl SigFile {
             .open(&path)
             .ok()?;
         f.write_all(sig.as_bytes()).ok()?;
-        f.write_all(b"\n").ok()?;
+        if !sig.ends_with('\n') {
+            f.write_all(b"\n").ok()?;
+        }
         Some(SigFile(path))
     }
 }
@@ -243,16 +247,128 @@ pub fn resolve_signers(given: &str) -> PathBuf {
     }
 }
 
-/// A note body back into the exact bytes that were signed, plus the signature.
+/// One signed statement out of a note: the exact bytes that were signed
+/// (trailing newline included) and the armored signature over them.
+#[derive(Debug, PartialEq)]
+pub struct Block {
+    pub payload: String,
+    pub signature: String,
+}
+
+/// A note into its blocks. Since 1.2.0 a note may hold several — a laptop's
+/// and a CI job's, each on its own platform — separated by blank lines, which
+/// is exactly what `git notes append` produces.
 ///
-/// The blank-line split ate the payload's trailing newline; it is part of the
-/// signed bytes, so it goes back.
-pub fn split_note(body: &str) -> Option<(String, String)> {
-    let (payload, sig) = body.split_once("\n\n")?;
-    if !sig.starts_with("-----BEGIN SSH SIGNATURE-----") {
-        return None;
+/// The grammar (SPEC.md): skip blank lines; a payload runs to the first blank
+/// line; skip blank lines; the next line must be the BEGIN marker, or parsing
+/// STOPS and what was collected so far stands; the signature runs to the END
+/// marker, and end of input closes an open one. Lines are split on LF only;
+/// `evaluate` rejects any note containing a carriage return before this runs.
+///
+/// Returns the blocks and whether more than `MAX_BLOCKS` were present.
+pub fn split_blocks(body: &str) -> (Vec<Block>, bool) {
+    enum State {
+        Between,
+        Payload,
+        WaitingForSignature,
+        Signature,
     }
-    Some((format!("{payload}\n"), sig.to_string()))
+    let mut blocks = Vec::new();
+    let mut state = State::Between;
+    let mut payload = String::new();
+    let mut signature = String::new();
+    let close = |blocks: &mut Vec<Block>, payload: &str, signature: &str| -> bool {
+        if blocks.len() == MAX_BLOCKS {
+            return true;
+        }
+        blocks.push(Block {
+            payload: payload.to_string(),
+            signature: signature.to_string(),
+        });
+        false
+    };
+    for line in body.split('\n') {
+        match state {
+            State::Between => {
+                if line.is_empty() {
+                    continue;
+                }
+                payload.clear();
+                payload.push_str(line);
+                payload.push('\n');
+                state = State::Payload;
+            }
+            State::Payload => {
+                if line.is_empty() {
+                    state = State::WaitingForSignature;
+                } else {
+                    payload.push_str(line);
+                    payload.push('\n');
+                }
+            }
+            State::WaitingForSignature => {
+                if line.is_empty() {
+                    continue;
+                }
+                if line != BEGIN {
+                    return (blocks, false);
+                }
+                signature.clear();
+                signature.push_str(line);
+                signature.push('\n');
+                state = State::Signature;
+            }
+            State::Signature => {
+                signature.push_str(line);
+                signature.push('\n');
+                if line == END {
+                    if close(&mut blocks, &payload, &signature) {
+                        return (blocks, true);
+                    }
+                    state = State::Between;
+                }
+            }
+        }
+    }
+    if let State::Signature = state {
+        if close(&mut blocks, &payload, &signature) {
+            return (blocks, true);
+        }
+    }
+    (blocks, false)
+}
+
+/// The first block of a note, for tests that only want one.
+#[cfg(test)]
+pub fn split_note(body: &str) -> Option<(String, String)> {
+    split_blocks(body)
+        .0
+        .into_iter()
+        .next()
+        .map(|b| (b.payload, b.signature))
+}
+
+/// Does an attestation minted on `ran_on` satisfy what the caller asked for?
+///
+/// `None` is "anywhere". A value with a dash is an exact `<arch>-<os>`. A value
+/// without one is an OS alone, compared to the part after the LAST dash of
+/// `ran_on` — never as a substring, so `inux` matches nothing and `x86_64`
+/// does not match `x86_64-linux`.
+pub fn platform_matches(want: Option<&str>, ran_on: &str) -> bool {
+    match want {
+        None => true,
+        Some(want) if want.contains('-') => want == ran_on,
+        Some(want) => ran_on.rsplit_once('-').is_some_and(|(_, os)| os == want),
+    }
+}
+
+/// Add names not already present, keeping first-appearance order.
+fn union<'a>(into: &mut Vec<String>, names: impl Iterator<Item = &'a str>) {
+    for name in names {
+        if !into.iter().any(|g| g == name) {
+            into.push(name.to_string());
+        }
+    }
 }
 
 /// Read a payload field BY PREFIX, never by line position: the payload has
@@ -260,11 +376,15 @@ pub fn split_note(body: &str) -> Option<(String, String)> {
 /// reader silently mis-assigns every field after an insertion rather than
 /// failing. First match wins, so a second `gates` line cannot smuggle a value
 /// past the caller.
+///
+/// Byte-strict, like `verify.sh`: lines are split on LF only and nothing is
+/// trimmed but the separating spaces, so a `\r` or a trailing space is part
+/// of the value and a `tree` line that carries one matches nothing.
 fn field<'a>(payload: &'a str, name: &str) -> Option<&'a str> {
     payload
-        .lines()
+        .split('\n')
         .find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix(' ')))
-        .map(str::trim)
+        .map(|v| v.trim_start_matches(' '))
 }
 
 /// The whole decision, trail included.
@@ -272,11 +392,14 @@ fn field<'a>(payload: &'a str, name: &str) -> Option<&'a str> {
 /// `principal` of `None` means "whoever the signature says, if that key is in
 /// the file"; `Some` narrows it to one identity. `require_platform` of `None`
 /// means the caller has stated this suite's result does not depend on where
-/// it ran.
+/// it ran. `anywhere` names gates the caller accepts from any platform — its
+/// committed statement that THOSE checks cannot depend on where they ran — and
+/// only ever admits gates from a block whose signature verified.
 pub fn evaluate(
     signers: &Path,
     principal: Option<&str>,
     require_platform: Option<&str>,
+    anywhere: &[String],
 ) -> Verdict {
     let mut trail = Vec::new();
 
@@ -291,82 +414,137 @@ pub fn evaluate(
             &mut trail,
             "cannot resolve HEAD^{tree} — not a git repository?".into(),
         );
-        return Verdict { gates: None, trail };
+        return Verdict {
+            gates: Vec::new(),
+            trail,
+        };
     };
+
+    let mut covered: Vec<String> = Vec::new();
+    // A producer writes its note to BOTH the tree and the commit, so the
+    // candidate loop meets the same note twice; it is judged once, by oid.
+    let mut seen: Vec<String> = Vec::new();
+    let mut tried = false;
 
     // The TREE first: it is what the signature covers, so it is the only key
     // that survives a squash-merge, an amend or a rebase. HEAD and HEAD^2
     // follow for notes written by a producer that keyed by commit only —
     // HEAD^2 because a PR checkout is a merge commit git made a moment ago,
     // whose second parent is the pushed tip that carries the note.
-    let mut tried = false;
     for candidate in [head_tree.as_str(), "HEAD", "HEAD^2"] {
         let Some(object) = git::stdout(&["rev-parse", "--verify", "--quiet", candidate]) else {
             continue;
         };
+        let Some(listing) = git::stdout(&["notes", "--ref", NOTES_REF, "list", &object]) else {
+            continue;
+        };
+        let note_oid = listing.split_whitespace().next().unwrap_or("").to_string();
+        if seen.contains(&note_oid) {
+            continue;
+        }
+        seen.push(note_oid);
         let Some(body) = git::stdout(&["notes", "--ref", NOTES_REF, "show", &object]) else {
             continue;
         };
         tried = true;
-        let Some((payload, sig)) = split_note(&body) else {
+
+        // LF only, the whole note: `verify.sh` applies the same test before
+        // any tool sees the bytes, because some awks drop carriage returns.
+        if body.contains('\r') {
+            push_reason(
+                &mut trail,
+                format!("note on {candidate} contains carriage returns; the format is LF-only"),
+            );
+            continue;
+        }
+
+        let (blocks, truncated) = split_blocks(&body);
+        if truncated {
+            push_reason(
+                &mut trail,
+                format!(
+                    "note on {candidate} has more than {MAX_BLOCKS} blocks; the rest were ignored"
+                ),
+            );
+        }
+        if blocks.is_empty() {
             push_reason(
                 &mut trail,
                 format!("note on {candidate} carries no signature block"),
             );
             continue;
-        };
-        if payload.lines().next() != Some(FORMAT) {
-            push_reason(
-                &mut trail,
-                format!("note on {candidate} is not {FORMAT} — a newer producer wrote it"),
-            );
-            continue;
         }
-        let (Some(tree), Some(gates), Some(ran_on)) = (
-            field(&payload, "tree"),
-            field(&payload, "gates"),
-            field(&payload, "platform"),
-        ) else {
-            push_reason(
-                &mut trail,
-                format!("note on {candidate} is missing a required field"),
-            );
-            continue;
-        };
-        if tree != head_tree {
-            push_reason(
-                &mut trail,
-                format!("attested tree {tree} is not the checked-out tree {head_tree}"),
-            );
-            continue;
-        }
-        if gates.is_empty() {
-            push_reason(
-                &mut trail,
-                "attestation lists no gates — a signed way of saying nothing".into(),
-            );
-            continue;
-        }
-        // A pass is a pass ON SOMETHING: a macOS `cargo test` is no evidence
-        // about the Windows leg of a matrix.
-        if let Some(want) = require_platform {
-            if want != ran_on {
+        let several = blocks.len() > 1;
+        for (i, block) in blocks.iter().enumerate() {
+            let at = if several {
+                format!("{candidate} block {}", i + 1)
+            } else {
+                candidate.to_string()
+            };
+            let payload = &block.payload;
+            if payload.split('\n').next() != Some(FORMAT) {
                 push_reason(
                     &mut trail,
-                    format!("attested on {ran_on}, this leg is {want}"),
+                    format!("note on {at} is not {FORMAT} — a newer producer wrote it"),
                 );
                 continue;
             }
-        }
-        match verify(&payload, &sig, signers, principal) {
-            Ok(signer) => {
-                push_reason(&mut trail, format!("covered by {signer}: {gates}"));
-                return Verdict {
-                    gates: Some(gates.split_whitespace().map(str::to_string).collect()),
-                    trail,
-                };
+            let (Some(tree), Some(gates), Some(ran_on)) = (
+                field(payload, "tree"),
+                field(payload, "gates"),
+                field(payload, "platform"),
+            ) else {
+                push_reason(
+                    &mut trail,
+                    format!("note on {at} is missing a required field"),
+                );
+                continue;
+            };
+            if tree != head_tree {
+                push_reason(
+                    &mut trail,
+                    format!("attested tree {tree} is not the checked-out tree {head_tree}"),
+                );
+                continue;
             }
-            Err(why) => push_reason(&mut trail, format!("note on {candidate}: {why}")),
+            if gates.is_empty() {
+                push_reason(
+                    &mut trail,
+                    "attestation lists no gates — a signed way of saying nothing".into(),
+                );
+                continue;
+            }
+            // Signature BEFORE platform: the `anywhere` list may only admit
+            // gates from a block that actually verified.
+            let signer = match verify(payload, &block.signature, signers, principal) {
+                Ok(signer) => signer,
+                Err(why) => {
+                    push_reason(&mut trail, format!("note on {at}: {why}"));
+                    continue;
+                }
+            };
+            // A pass is a pass ON SOMETHING: a macOS `cargo test` is no
+            // evidence about the Windows leg of a matrix.
+            if platform_matches(require_platform, ran_on) {
+                union(&mut covered, gates.split_whitespace());
+                push_reason(
+                    &mut trail,
+                    format!("covered by {signer} on {ran_on}: {gates}"),
+                );
+                continue;
+            }
+            let accepted: Vec<&str> = gates
+                .split_whitespace()
+                .filter(|g| anywhere.iter().any(|a| a == g))
+                .collect();
+            union(&mut covered, accepted.iter().copied());
+            let want = require_platform.unwrap_or("any");
+            let mut reason = format!("attested on {ran_on} by {signer}, this leg is {want}");
+            if !accepted.is_empty() {
+                reason.push_str("; accepted anywhere: ");
+                reason.push_str(&accepted.join(" "));
+            }
+            push_reason(&mut trail, reason);
         }
     }
 
@@ -376,5 +554,104 @@ pub fn evaluate(
             format!("no attestation found for tree {head_tree}"),
         );
     }
-    Verdict { gates: None, trail }
+    Verdict {
+        gates: covered,
+        trail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIG: &str = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----";
+
+    fn block(n: u32) -> String {
+        format!("amont-attest-v2\ntree t{n}\ngates g{n}\nplatform p{n}\n\n{SIG}")
+    }
+
+    #[test]
+    fn platform_matching_is_exact_or_os_only_never_a_substring() {
+        assert!(platform_matches(None, "s390x-aix"));
+        assert!(platform_matches(Some("x86_64-linux"), "x86_64-linux"));
+        assert!(!platform_matches(Some("x86_64-linux"), "aarch64-linux"));
+        assert!(platform_matches(Some("linux"), "x86_64-linux"));
+        assert!(platform_matches(Some("linux"), "aarch64-linux"));
+        assert!(!platform_matches(Some("inux"), "x86_64-linux"));
+        assert!(!platform_matches(Some("x86_64"), "x86_64-linux"));
+        assert!(!platform_matches(Some("linux"), "linux"));
+    }
+
+    #[test]
+    fn one_block_restores_the_signed_trailing_newline() {
+        let (blocks, truncated) = split_blocks(&block(1));
+        assert!(!truncated);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0].payload,
+            "amont-attest-v2\ntree t1\ngates g1\nplatform p1\n"
+        );
+        assert_eq!(blocks[0].signature, format!("{SIG}\n"));
+    }
+
+    #[test]
+    fn two_blocks_as_git_notes_append_writes_them() {
+        let body = format!("{}\n\n{}", block(1), block(2));
+        let (blocks, _) = split_blocks(&body);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[1].payload.starts_with("amont-attest-v2\ntree t2\n"));
+        // extra blank lines between blocks are tolerated
+        let body = format!("{}\n\n\n\n{}\n", block(1), block(2));
+        assert_eq!(split_blocks(&body).0.len(), 2);
+    }
+
+    #[test]
+    fn end_of_input_closes_an_open_signature() {
+        let body = "amont-attest-v2\ntree abc\n\n-----BEGIN SSH SIGNATURE-----\nx";
+        let (payload, sig) = split_note(body).unwrap();
+        assert_eq!(payload, "amont-attest-v2\ntree abc\n");
+        assert_eq!(sig, "-----BEGIN SSH SIGNATURE-----\nx\n");
+    }
+
+    #[test]
+    fn framing_errors_stop_parsing_and_keep_what_came_before() {
+        assert!(split_note("no blank line here").is_none());
+        assert!(split_note("payload\n\nnot a signature").is_none());
+        // a second block whose signature never begins: block 1 stands alone
+        let body = format!("{}\n\npayload2\n\nnot a signature", block(1));
+        assert_eq!(split_blocks(&body).0.len(), 1);
+        // a block that never ends swallows the valid one after it
+        let body = format!("p\n\n-----BEGIN SSH SIGNATURE-----\nx\n\n{}", block(2));
+        let (blocks, _) = split_blocks(&body);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].signature.contains("tree t2"));
+        // garbage after the last block is ignored
+        let body = format!("{}\n\ngarbage", block(1));
+        assert_eq!(split_blocks(&body).0.len(), 1);
+    }
+
+    #[test]
+    fn a_crlf_note_has_no_blank_line_and_therefore_no_block() {
+        let body = block(1).replace('\n', "\r\n");
+        assert!(split_blocks(&body).0.is_empty());
+    }
+
+    #[test]
+    fn at_most_max_blocks_are_read() {
+        let body: Vec<String> = (0..40).map(block).collect();
+        let (blocks, truncated) = split_blocks(&body.join("\n\n"));
+        assert_eq!(blocks.len(), MAX_BLOCKS);
+        assert!(truncated);
+        let body: Vec<String> = (0..MAX_BLOCKS as u32).map(block).collect();
+        let (blocks, truncated) = split_blocks(&body.join("\n\n"));
+        assert_eq!(blocks.len(), MAX_BLOCKS);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn union_keeps_first_appearance_order_without_duplicates() {
+        let mut v = vec!["a".to_string()];
+        union(&mut v, "b a c b".split_whitespace());
+        assert_eq!(v, ["a", "b", "c"]);
+    }
 }

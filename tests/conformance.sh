@@ -16,99 +16,15 @@
 # fixture every implementation passes is testing nothing.
 set -u
 
+# shellcheck disable=SC2034  # read by lib.sh
 IMPL=${1:?usage: conformance.sh <implementation command>}
-PASS=0; FAIL=0; FAILED_CASES=
-
-ARCH=$(uname -m); case "$ARCH" in arm64 | aarch64) ARCH=aarch64 ;; esac
-case "$(uname -s)" in Darwin) OS=macos ;; Linux) OS=linux ;; *) OS=windows ;; esac
-PLATFORM=$ARCH-$OS
-
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-
-ssh-keygen -q -t ed25519 -N '' -C signer@example.org -f "$WORK/key"
-ssh-keygen -q -t ed25519 -N '' -C second@example.org -f "$WORK/second"
-ssh-keygen -q -t ed25519 -N '' -C signer@example.org -f "$WORK/other"
-
-# A repository with one commit and an allowed_signers naming `principal` —
-# and, when a second pair is given, a second signer after it.
-#
-# `core.hooksPath=/dev/null` because this suite runs on a machine where amont's
-# own hooks are installed globally via init.templateDir; without it the fixture
-# commits are judged by the host's commit-msg policy.
-make_repo() { # dir principal keyfile [principal2 keyfile2]
-    local dir=$1 principal=$2 keyfile=$3
-    rm -rf "$dir"; mkdir -p "$dir/.github"
-    git init -q "$dir"
-    git -C "$dir" config core.hooksPath /dev/null
-    git -C "$dir" config user.email signer@example.org
-    git -C "$dir" config user.name Signer
-    printf '%s namespaces="amont-attest" %s\n' "$principal" "$(cat "$keyfile.pub")" \
-        > "$dir/.github/allowed_signers"
-    [ $# -lt 5 ] || printf '%s namespaces="amont-attest" %s\n' "$4" "$(cat "$5.pub")" \
-        >> "$dir/.github/allowed_signers"
-    echo content > "$dir/file.txt"
-    git -C "$dir" add -A
-    git -C "$dir" commit -q -m init
-}
-
-# Sign `payload` with `keyfile` and attach it to the repo's HEAD tree — or to
-# `target`, for a producer that keyed by commit.
-attach_note() { # dir payload keyfile [target]
-    local dir=$1 payload=$2 keyfile=$3 target=${4:-}
-    [ -n "$target" ] || target=$(git -C "$dir" rev-parse 'HEAD^{tree}')
-    # The payload's TRAILING NEWLINE is part of the signed bytes (SPEC.md).
-    # Command substitution ate it when `payload` was captured, so it goes back
-    # on here — signing the four lines without it produces a signature that is
-    # valid over bytes no verifier will ever reconstruct.
-    printf '%s\n' "$payload" > "$dir/.p"
-    ssh-keygen -Y sign -n amont-attest -f "$keyfile" "$dir/.p" > /dev/null 2>&1
-    # payload + its newline + a blank line + the armored signature.
-    git -C "$dir" notes --ref amont-attest add -f \
-        -m "$(printf '%s\n\n%s' "$payload" "$(cat "$dir/.p.sig")")" "$target" 2> /dev/null
-    rm -f "$dir/.p" "$dir/.p.sig"
-}
-
-payload_for() { # dir gates platform [format]
-    printf 'amont-attest-v2\ntree %s\ngates %s\nplatform %s\namont 1.23.0\n' \
-        "$(git -C "$1" rev-parse 'HEAD^{tree}')" "$2" "$3" | sed "1s/.*/${4:-amont-attest-v2}/"
-}
-
-check() { # name expected-stdout dir [extra flags...]
-    local name=$1 want=$2 dir=$3; shift 3
-    local got rc
-    # $IMPL is a command LINE ("git-attest covered") and must word-split;
-    # the flags after it must not. Rebuilding the positional parameters does
-    # both, and without `eval` — which would re-split the flags too.
-    # shellcheck disable=SC2086
-    got=$(cd "$dir" && set -- $IMPL "$@" && "$@" 2> /dev/null); rc=$?
-    got=$(printf '%s' "$got" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')
-    if [ "$got" = "$want" ] && [ "$rc" -eq 0 ]; then
-        PASS=$((PASS + 1)); printf '  ok    %s\n' "$name"
-    else
-        FAIL=$((FAIL + 1)); FAILED_CASES="$FAILED_CASES\n    $name"
-        printf '  FAIL  %s\n         want %-28s got %s (exit %s)\n' \
-            "$name" "[$want]" "[$got]" "$rc"
-    fi
-}
-
-# A usage error: exit 2 and NOTHING on stdout. The one exception to "always
-# exit 0", because a typo in a flag is the author's mistake, not the
-# repository's state — and a verifier that silently ignored `--platfrom any`
-# would just never cover anything.
-check_usage() { # name dir [flags...]
-    local name=$1 dir=$2; shift 2
-    local got rc
-    # shellcheck disable=SC2086
-    got=$(cd "$dir" && set -- $IMPL "$@" && "$@" 2> /dev/null); rc=$?
-    if [ -z "$got" ] && [ "$rc" -eq 2 ]; then
-        PASS=$((PASS + 1)); printf '  ok    %s\n' "$name"
-    else
-        FAIL=$((FAIL + 1)); FAILED_CASES="$FAILED_CASES\n    $name"
-        printf '  FAIL  %s\n         want exit 2, nothing on stdout; got [%s] (exit %s)\n' \
-            "$name" "$got" "$rc"
-    fi
-}
+# The helper is sourced, which shellcheck follows only under -x; the hook
+# runs without it, so the two findings that follow from that are silenced.
+# shellcheck source=lib.sh disable=SC1091
+. "$(dirname "$0")/lib.sh"
+gen_keys
 
 R=$WORK/r
 
@@ -193,6 +109,15 @@ git -C "$R" notes --ref amont-attest add -f \
     -m "$(printf '%s' "$body" | sed 's/gates pre-push-cargo-test/gates pre-push-cargo-test pre-push-audit-rust/')" "$tree" 2> /dev/null
 check "payload edited after signing" "" "$R"
 
+# A note containing a carriage return anywhere is rejected whole, whether
+# some tool converted an LF-signed note to CRLF or the payload was signed with
+# carriage returns in it. Both cover nothing, in both implementations.
+make_repo "$R" signer@example.org "$WORK/key"
+raw_note "$R" "$(sign_block "$R" "$(payload_for "$R" pre-push-cargo-test "$PLATFORM")" "$WORK/key" | sed 's/$/\r/')"
+check "LF-signed note converted to CRLF" "" "$R"
+attach_note "$R" "$(payload_for "$R" pre-push-cargo-test "$PLATFORM" | sed 's/$/\r/')" "$WORK/key"
+check "payload signed with CRLF" "" "$R"
+
 make_repo "$R" signer@example.org "$WORK/key"
 check "no note at all" "" "$R"
 
@@ -215,8 +140,124 @@ check "--signers to a missing file" "" "$R" --signers nope/allowed_signers
 git -C "$R" commit -q --amend -m "reworded, same tree"
 check "survives a reword (same tree)" "pre-push-cargo-test" "$R"
 
+# --- platform matching (1.2.0) ----------------------------------------------
+# An OS alone matches any architecture; it is compared to the part after the
+# LAST dash of the note's platform, never as a substring.
+make_repo "$R" signer@example.org "$WORK/key"
+attach_note "$R" "$(payload_for "$R" pre-push-cargo-test "$PLATFORM")" "$WORK/key"
+check "os-only platform matches this arch" "pre-push-cargo-test" "$R" --platform "$OS"
+check "os-only platform mismatch" "" "$R" --platform aix
+attach_note "$R" "$(payload_for "$R" pre-push-cargo-test x86_64-linux)" "$WORK/key"
+check "os-only linux matches x86_64-linux" "pre-push-cargo-test" "$R" --platform linux
+check "os-only is not a substring match" "" "$R" --platform inux
+check "os-only is not an arch match" "" "$R" --platform x86_64
+check "a dashed platform is still exact" "" "$R" --platform aarch64-linux
+
+# --- gates accepted from anywhere (1.2.0) -----------------------------------
+# The caller's committed statement that the NAMED gates cannot depend on where
+# they ran. It admits nothing from a block that did not verify.
+make_repo "$R" signer@example.org "$WORK/key"
+attach_note "$R" "$(payload_for "$R" "ci-fmt pre-push-cargo-test" s390x-aix)" "$WORK/key"
+check "foreign platform covers nothing by default" "" "$R"
+check "--anywhere admits the named gate only" "ci-fmt" "$R" --anywhere ci-fmt
+check "--anywhere with two names" "ci-fmt pre-push-cargo-test" "$R" --anywhere "ci-fmt pre-push-cargo-test"
+check "--anywhere does not admit an unlisted name" "" "$R" --anywhere ci-clippy
+attach_note "$R" "$(payload_for "$R" ci-fmt s390x-aix)" "$WORK/other"
+check "--anywhere never rescues an unverifiable block" "" "$R" --anywhere ci-fmt
+attach_note "$R" "$(printf 'amont-attest-v2\ntree %s\ngates ci-fmt\nplatform s390x-aix\namont 1.23.0\n' \
+    0000000000000000000000000000000000000000)" "$WORK/key"
+check "--anywhere never rescues a stale tree" "" "$R" --anywhere ci-fmt
+attach_note "$R" "$(payload_for "$R" ci-fmt s390x-aix | grep -v '^platform ')" "$WORK/key"
+check "--anywhere never rescues a missing platform line" "" "$R" --anywhere ci-fmt
+attach_note "$R" "$(payload_for "$R" ci-fmt s390x-aix amont-attest-v1)" "$WORK/key"
+check "--anywhere never rescues an unknown format" "" "$R" --anywhere ci-fmt
+
+# --- several blocks in one note (1.2.0) -------------------------------------
+# A laptop and a CI job both attest the same tree, each on its own platform,
+# by APPENDING a block. Every block is judged on its own; the answer is the
+# union of the ones that pass.
+make_repo "$R" signer@example.org "$WORK/key" second@example.org "$WORK/second"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g2 "$PLATFORM")" "$WORK/second"
+check "two blocks written by git notes append, union in order" "g1 g2" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 s390x-aix)" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g2 "$PLATFORM")" "$WORK/key"
+check "foreign block then local block: local gates only" "g2" "$R"
+check "foreign then local, --platform any takes both" "g1 g2" "$R" --platform any
+check "foreign then local, --anywhere admits the foreign gate" "g1 g2" "$R" --anywhere g1
+
+# The compatibility shape: block 1 on this platform, block 2 foreign. A 1.1.0
+# verifier reads block 1 only (tests/compat.sh proves it); this one reads both
+# and still answers block 1's gates here.
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g2 s390x-aix)" "$WORK/key"
+check "local block then foreign block" "g1" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g2 "$PLATFORM")" "$WORK/key"
+tree=$(git -C "$R" rev-parse 'HEAD^{tree}')
+body=$(git -C "$R" notes --ref amont-attest show "$tree")
+raw_note "$R" "$(printf '%s' "$body" | sed 's/^gates g2$/gates g2 g3/')"
+check "second block tampered: first still counts" "g1" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/other"
+append_note "$R" "$(payload_for "$R" g2 "$PLATFORM")" "$WORK/key"
+check "first block by a stranger: second still counts" "g2" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g2 "$PLATFORM" amont-attest-v3)" "$WORK/key"
+check "second block is a newer format: first still counts" "g1" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+block=$(sign_block "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key")
+raw_note "$R" "$(printf '%s\n\n%s' "$block" "$block")"
+check "duplicate identical blocks: gate listed once" "g1" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 s390x-aix)" "$WORK/key"
+check "same gate on two platforms, listed once" "g1" "$R" --platform any
+
+make_repo "$R" signer@example.org "$WORK/key"
+b1=$(sign_block "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key")
+b2=$(sign_block "$R" "$(payload_for "$R" g2 "$PLATFORM")" "$WORK/key")
+raw_note "$R" "$(printf '%s\n\n\n\n%s\n' "$b1" "$b2")"
+check "several blank lines between blocks" "g1 g2" "$R"
+raw_note "$R" "$(printf '%s\n\ngarbage after the last block' "$b1")"
+check "garbage after the last block is ignored" "g1" "$R"
+raw_note "$R" "$(printf '%s\n\npayload2\n\nnot a signature' "$b1")"
+check "a second block without BEGIN: parsing stops, first counts" "g1" "$R"
+raw_note "$R" "$(printf 'p\n\n-----BEGIN SSH SIGNATURE-----\nx\n\n%s' "$b2")"
+check "a block missing END swallows the valid block after it" "" "$R"
+
+# A note reached through the tree AND the commit is judged once.
+make_repo "$R" signer@example.org "$WORK/key"
+append_note "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key"
+append_note "$R" "$(payload_for "$R" g2 "$PLATFORM")" "$WORK/key"
+git -C "$R" notes --ref amont-attest copy -f "$(git -C "$R" rev-parse 'HEAD^{tree}')" HEAD 2> /dev/null
+check "note on tree and commit is judged once" "g1 g2" "$R"
+
+# At most 32 blocks are read. 31 stranger blocks then a valid one is covered;
+# 39 then a valid one is not.
+make_repo "$R" signer@example.org "$WORK/key"
+stranger=$(sign_block "$R" "$(payload_for "$R" g0 "$PLATFORM")" "$WORK/other")
+valid=$(sign_block "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key")
+many() { local _; for _ in $(seq "$1"); do printf '%s\n\n' "$stranger"; done; printf '%s' "$valid"; }
+raw_note "$R" "$(many 31)"
+check "the 32nd block is still read" "g1" "$R"
+raw_note "$R" "$(many 39)"
+check "the 40th block is not read" "" "$R"
+
 # --- the JSON shape the actions publish ------------------------------------
 if [ "${SKIP_JSON:-}" != 1 ]; then
+    make_repo "$R" signer@example.org "$WORK/key"
+    attach_note "$R" "$(payload_for "$R" pre-push-cargo-test "$PLATFORM")" "$WORK/key"
     check "json array output" '["pre-push-cargo-test"]' "$R" --json
     make_repo "$R" signer@example.org "$WORK/key"
     check "json empty array when uncovered" '[]' "$R" --json
@@ -244,5 +285,4 @@ if [ "${SKIP_JSON:-}" != 1 ]; then
         'covered= gates=[]' "$R" --github-output
 fi
 
-printf '\n  %s passed, %s failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || { printf '  failing:%b\n' "$FAILED_CASES"; exit 1; }
+summary

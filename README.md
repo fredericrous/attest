@@ -11,14 +11,30 @@ proved, and lets CI **verify** that signature and skip the work.
 - uses: actions/checkout@v4
 - id: attest
   uses: fredericrous/attest@v1
+  with:
+    anywhere: ci-fmt        # gates whose result cannot depend on where they ran
 
-- run: cargo test --workspace
+- id: fmt
+  run: cargo fmt --all -- --check
+  if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-fmt') }}
+- id: test
+  run: cargo test --workspace
   if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+
+# Last, and only after every gate above: sign what THIS job ran, so the next
+# run of the same tree (a re-run, the push to main after the merge) skips it.
+- uses: fredericrous/attest/sign@v1
+  with:
+    key: ${{ secrets.ATTEST_SIGNING_KEY }}
+    gates: >-
+      ${{ steps.fmt.outcome  == 'success' && 'ci-fmt'              || '' }}
+      ${{ steps.test.outcome == 'success' && 'pre-push-cargo-test' || '' }}
 ```
 
 That is the whole integration. Nothing is skipped unless a signature by a key
 **you committed to the repository** covers the **exact tree** CI checked out,
-on the **same platform** the job is running.
+on the **same platform** the job is running — or, for the gates you named in
+`anywhere`, on any platform.
 
 ## Safety, stated plainly
 
@@ -79,6 +95,16 @@ gate called `pre-push-cargo-test` that runs `cargo test --lib` does not cover
 a CI step running `cargo test --workspace`, whatever the name says — make them
 the same command.
 
+**Platform.** By default an attestation counts only on the platform it was
+minted on, as `<arch>-<os>`; `platform: linux` accepts any architecture, and
+`platform: any` accepts anywhere. Most laptops are macOS and most CI is Linux,
+so with only a laptop producing, the default skips nothing — which is what
+`anywhere` and the `sign` action are for. `anywhere` names the gates whose
+result cannot depend on where they ran: formatting, shell lint, secret
+scanning, dependency audit. It is a loaded gun. Never list a check that
+compiles or executes the product, and that includes clippy: `cfg` and
+target-specific dependencies change what it sees.
+
 The signature covers the **tree**, so an attestation survives a reword, an
 amend, a rebase and a squash-merge. On a `pull_request` trigger, though, CI
 checks out a merge commit the forge just made, and its tree equals your pushed
@@ -95,10 +121,43 @@ push access.
 
 ## Producing attestations
 
-[amont](https://github.com/fredericrous/amont) is the reference producer: with
-`amont.attest` enabled it signs a note at `pre-push` naming the gates that
-actually passed. Any tool can produce one — [`SPEC.md`](SPEC.md) is the format,
-and it is short.
+[amont](https://github.com/fredericrous/amont) is the reference producer on a
+laptop: with `amont.attest` enabled it signs a note at `pre-push` naming the
+gates that actually passed. Any tool can produce one — [`SPEC.md`](SPEC.md) is
+the format, and it is short.
+
+### From CI
+
+CI tests the merge tree during the pull request, then the push to main tests
+the identical tree again. `fredericrous/attest/sign` records the first result
+so the second run skips it — and so do re-runs and duplicated matrix legs.
+Setup, once:
+
+```sh
+ssh-keygen -t ed25519 -N '' -C ci@example.invalid -f attest-ci
+gh secret set ATTEST_SIGNING_KEY < attest-ci
+printf '%s namespaces="amont-attest" %s\n' ci@example.invalid "$(cat attest-ci.pub)" >> .github/allowed_signers
+rm attest-ci
+```
+
+Then the trailing step shown at the top, with three rules that keep it honest:
+
+- **Put it last, never under `if: always()`.** The default `success()` is
+  what guarantees a failed gate is never signed.
+- **Name only what ran here**, with the `steps.<id>.outcome == 'success'`
+  pattern. A step that was skipped because it was already attested has
+  `outcome == 'skipped'`, and re-signing it would claim someone else's platform
+  as yours.
+- **The job needs `permissions: contents: write`** to push the notes ref.
+  That permission is not ref-scoped — GitHub has no notes-only token — so put
+  a ruleset on `main`; rulesets apply to `GITHUB_TOKEN` too. A signing key in
+  a secret is exactly as trusted as a workflow file: whoever can change
+  `.github/workflows/` can make CI sign anything.
+
+Fork pull requests get no secret and a read-only token; both paths just report
+and succeed. A tree your laptop already attested gets CI's block **appended**
+beside yours, each on its own platform. ed25519 keys only. `sign@v1` resolves
+only from 1.2.0 on.
 
 An attestation is only as honest as the push that produced it, and the way a
 push gets dishonest in practice is a coding agent masking its failure —
@@ -114,6 +173,7 @@ conviction: trust what was verified, never what was reported.
 |---|---|
 | [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format |
 | [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo |
+| [`sign/`](sign/) | the CI producer: `sign/action.yml` wraps `sign/sign.sh` |
 | [`verify.sh`](verify.sh) | the verifier the action runs. `git` and `ssh-keygen`, nothing else |
 | `src/` | `git-attest`, the same contract as a binary |
 | [`tests/conformance.sh`](tests/conformance.sh) | the fixtures both implementations must pass |
@@ -157,6 +217,9 @@ make check                                  # both implementations
 
 `tests/legacy.sh` is a **negative control** — the verifier this project
 replaces, kept so the suite can prove it is not vacuous. Cases marked
-`(defect N)` must fail against it. Please don't fix it.
+`(defect N)` must fail against it. Please don't fix it. `tests/compat/` holds
+the 1.1.0 verifier, frozen, for the same reason: `make compat` proves a
+one-block reader degrades safely on a multi-block note. `tests/sign.sh` is the
+producer's suite.
 
 MIT.
