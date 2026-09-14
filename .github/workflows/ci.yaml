@@ -37,7 +37,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - id: shellcheck
         if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-shellcheck') }}
-        run: shellcheck verify.sh sign/sign.sh tests/*.sh
+        run: shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git
       - uses: ./sign
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}

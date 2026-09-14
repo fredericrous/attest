@@ -147,16 +147,23 @@ itself and has no such gap.
 
 ## Verifying
 
-A verifier reports gates as covered when **all** of these hold. Anything else,
-including any error, reports nothing covered:
+A verifier reports a gate of a block as covered when **all** of these hold.
+Anything else, including any error, reports nothing covered:
 
 1. the payload's first line is exactly `amont-attest-v2`;
-2. `tree` equals the tree actually checked out (`git rev-parse 'HEAD^{tree}'`);
-3. `gates` is non-empty;
-4. `platform` matches what the caller asked for (see below);
-5. `ssh-keygen -Y verify -n amont-attest` succeeds against an `allowed_signers`
+2. `gates` is non-empty and names the gate;
+3. `ssh-keygen -Y verify -n amont-attest` succeeds against an `allowed_signers`
    file **committed in the consuming repository**, for a principal that file
-   names.
+   names;
+4. the gate qualifies by tree **or** by fingerprint: `tree` equals the tree
+   actually checked out (`git rev-parse 'HEAD^{tree}'`), or the block carries
+   `input <gate> <fp>` and `<fp>` equals the gate's fingerprint on the
+   checked-out tree (see "Input fingerprints");
+5. `platform` matches what the caller asked for (see below).
+
+Rule 3 comes before rule 4 on purpose: a fingerprint, like the `anywhere`
+list, is a claim inside the payload, and only a verified payload may make
+one.
 
 ```
 you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
@@ -207,7 +214,115 @@ change to who may skip CI**. Anyone who can push a branch and the notes ref
 can add a key there and attest the same tree with it. That is the trust level
 of editing a workflow file, no more — but repositories that guard
 `.github/workflows/` with CODEOWNERS or required review should guard
-`allowed_signers` the same way.
+`allowed_signers` the same way — and `attest-inputs` too, once it exists
+(see "Input fingerprints").
+
+### Input fingerprints
+
+An attestation keyed by the root tree dies with any change anywhere: a docs
+commit on main, an unrelated package in a monorepo, the pull-request merge
+commit whenever base moved. A gate's result depends on the files it reads, so
+a repository may declare those files once, and a gate is then covered on any
+tree whose declared inputs are **byte-identical** to the attested ones.
+
+**The spec.** `.forgejo/attest-inputs`, then `.github/attest-inputs`, read from
+the tree being verified or signed (`git cat-file blob <tree>:<path>`), never
+from the working copy. Missing means "no fingerprint route", silently.
+Unreadable or invalid disables the route and is reported. Both present
+disables the route ("ambiguous"). The grammar, checked on the raw bytes
+before anything is parsed, and identical in both implementations:
+
+- **`git ls-tree` does not glob.** Paths are literal files or directories,
+  relative to the root; `tests/*.sh` would match nothing and silently
+  fingerprint nothing, so it is refused.
+- Any byte outside printable ASCII (0x21–0x7E), space, tab and LF — a NUL, a
+  CR, a control byte, any non-ASCII byte, which includes every Unicode
+  whitespace — invalidates the spec. More than 65 536 bytes invalidates it.
+  A path with other bytes is covered by naming an ASCII parent directory.
+- A line is bytes up to LF; a final line without LF is a line. A line whose
+  first non-blank byte is `#` is a comment; blank lines are ignored; `#` is
+  not a mid-line comment.
+- Tokens split on runs of space and tab: `<gate> <path>...`. A gate name
+  matches `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. At least one path; a duplicate
+  gate; more than 64 gates or 64 paths per gate — each invalidates.
+- A path is invalid if it starts with `:`, `/`, `./` or `../`, ends with `/`,
+  contains `*`, `?`, `[`, `]` or `\`, or has an empty, `.` or `..`
+  component. Spaces are unrepresentable.
+- **Any violation invalidates the whole spec**, never one line: a line that
+  silently dropped out would be one the author believes is protecting
+  something.
+
+**The fingerprint** of gate `g` on tree `T`, computed from the repository
+root:
+
+```
+B  = git ls-tree -r -z --full-tree T -- \
+       .forgejo/attest-inputs .github/attest-inputs .gitmodules \
+       <.gitattributes at the root and at every ancestor directory of every
+        declared path of g, deduplicated> \
+       <g's declared paths, in spec order>
+fp = git hash-object --stdin < B         (40 hex; 64 in a sha256 repository)
+```
+
+Preconditions, checked identically by producer and verifier: the spec is
+valid, and every declared path of `g` resolves on `T` (one `git cat-file
+--batch-check` per gate; a `missing` answer disqualifies the gate). Both
+processes must succeed: if `ls-tree` exits non-zero for any reason, including
+after emitting records, `g` has no fingerprint on `T`. An empty listing is
+refused. Both spec locations are always listed, so adding, removing or
+editing either invalidates; the spec's own blob is in the listing, so a spec
+change invalidates; ancestor `.gitattributes` and `.gitmodules` are listed
+because they change what a checkout yields without changing any listed blob.
+The argument order does not affect the value; `hash-object --stdin` applies
+no filters. A drift in git's output on one side can only lose a skip, never
+grant one.
+
+What a fingerprint binds is committed bytes, modes and attributes. It does
+not bind external filter configuration, tool versions, or the environment;
+those are the platform line's and the gate name's business. A symlink that
+points outside the declared set, and a spec that omits something a gate
+reads, are the consumer's declaration problem — the same class as the
+`anywhere` list. A gitlink is bound by its pointer; a path inside a submodule
+matches nothing and fails closed.
+
+**The payload line.** `input <gate> <fp>`: exactly three blank-separated
+fields, one line per fingerprinted gate, after `platform` and before
+`amont`, in spec order. A reader accepts only exactly three fields and an
+oid of 40 or 64 lowercase hex digits; the first occurrence per gate wins.
+Producers before 1.3.0 write no such line; verifiers before 1.3.0 ignore it.
+
+**The synthetic key.** `K(g, fp)` is `git hash-object --stdin` over exactly
+the bytes `amont-attest-input <g> <fp>\n`. Producers attach the block under
+`K` in a **second notes ref, `refs/notes/amont-attest-inputs`**; a verifier
+computes `fp` on the checked-out tree and looks `K` up there. Every key in
+that ref is an oid that is not an object — `git notes` accepts that, and
+`git notes list` shows it, by design. **Never run `git notes prune` on that
+ref**: it drops every note there. Never merge either ref with `cat_sort_uniq`:
+it sorts lines and destroys block framing (true since 1.2.0). The main ref
+keeps its invariant that every key is a real object.
+
+**Lookup.** Candidates are `HEAD^{tree}`, `HEAD`, `HEAD^2` in the main ref,
+then — lazily, only for gates the spec declares and nothing above covered —
+`K(g, fp)` in the inputs ref. Every block found anywhere is judged by the
+same rules; a block's verdict depends only on its content and the checked-out
+tree, so a block already judged is skipped wherever it appears again (by its
+exact bytes; a note already read is skipped by its oid). A verifier verifies
+at most 64 signatures per invocation over all candidates — one verification
+being one call of its verify routine — and says so when the budget is spent.
+
+**Compatibility.** `input` lines are additive; the format token stays
+`amont-attest-v2`. A 1.1.0 or 1.2.0 verifier reads a block that carries
+them exactly as before, by tree, and never reaches a synthetic key.
+`tests/compat-fields.sh` proves this against the frozen 1.1.0 and 1.2.0
+implementations.
+
+**Trust.** The spec is read from the tree being verified, so it is a trust
+boundary like `allowed_signers`: a pull request can shrink a gate's declared
+inputs. That PR gets no skips itself, because the spec's oid is in every
+fingerprint, but every later PR that avoids the declared paths does. That is
+the two-step trust of editing a workflow file; guard `attest-inputs` the way
+`allowed_signers` is guarded. (`allowed_signers` itself is read from disk,
+the spec from the tree — the inconsistency is noted rather than deepened.)
 
 ### Fail-open is the contract
 
@@ -255,6 +370,13 @@ producer for CI. What a producer owes this format:
   must not sign any other. On a `pull_request` checkout that tree is the
   forge's merge tree.
 - Name the platform honestly, and key the note to the tree.
+- **Fingerprints, when the tree declares them.** Read the spec from the tree
+  being signed; for each gate being attested that the spec declares and whose
+  paths all resolve on that tree, compute the fingerprint exactly as above,
+  add its `input` line, and append the block under `K(gate, fp)` in the
+  inputs ref as well as under the object in the main ref. Publish the two
+  refs independently, and on a later run repair whichever keys are missing
+  the block. An invalid spec degrades to the object-keyed block.
 - **Append, never replace.** Write the block with `git notes append`; `git
   notes add -f` erases every other producer's block on that tree. Keep the
   `amont <version>` line stable across runs — no run id, no timestamp — so a

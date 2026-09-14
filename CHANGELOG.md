@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Input fingerprints.** A committed `.github/attest-inputs` (or
+  `.forgejo/`) names the paths each gate reads. A gate is then covered by an
+  attestation of ANY tree whose declared inputs are byte-identical, so a docs
+  commit on main, an unrelated package in a monorepo, or a moved base no
+  longer voids it. The fingerprint is `git hash-object` over the `ls-tree`
+  listing of those paths (plus the spec itself, `.gitmodules` and ancestor
+  `.gitattributes`); producers write it as an `input <gate> <fp>` payload line
+  and attach the block under a synthetic key in a second notes ref,
+  `refs/notes/amont-attest-inputs`. Both verifiers read that ref; verifiers
+  before 1.3.0 ignore the new lines and never reach it. The spec grammar is
+  strict (literal paths only — `ls-tree` does not glob — ASCII only, whole
+  spec invalid on any error) and it is a trust boundary like
+  `allowed_signers`. Each run verifies at most 64 signatures. Never run
+  `git notes prune` on the inputs ref.
+
 ## 1.2.0
 
 Why so few skips, answered. With only a laptop producing and the platform

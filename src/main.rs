@@ -36,6 +36,9 @@ git-attest — what a signed attestation covers for the tree checked out here
                     audit): a verified attestation from any platform covers
                     them. Never a check that compiles or executes the product.
   --json            print a JSON array instead of a space-separated list
+                    A committed .github/attest-inputs (or .forgejo/) names the
+                    paths each gate reads; a gate is then also covered by an
+                    attestation of any tree whose declared inputs are identical.
   --github-output   print `covered=` and `gates=` lines ready to append to
                     $GITHUB_OUTPUT
 ";

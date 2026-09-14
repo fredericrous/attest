@@ -113,6 +113,26 @@ log reads `attested tree … is not the checked-out tree …` and the tests run 
 correctly, because that merged result was never tested. Rebase to get the skip
 back, or verify on `push`.
 
+**Unrelated changes.** By default an attestation names a whole tree, so any
+commit anywhere — a README fix on main, another package in a monorepo — moves
+the tree and voids it. Declare what each gate actually reads and it survives
+them:
+
+```
+# .github/attest-inputs — literal paths and directories only: git ls-tree
+# does NOT glob, `tests/*.sh` would match nothing and fingerprint nothing.
+pre-push-cargo-test .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src
+ci-fmt              .github/workflows/ci.yaml Cargo.toml rust-toolchain.toml src
+```
+
+A gate is then covered on any tree whose declared paths are byte-identical to
+the attested ones (producers from 1.3.0 write the fingerprint into the note;
+this file is itself an input, so editing it re-runs everything once). Name
+the workflow file too: the gate name is only worth the command behind it.
+ASCII paths only, no spaces; name a parent directory instead. Over-broad is
+safe, under-broad is a silent false skip — so this file is a trust boundary
+exactly like `allowed_signers`, and belongs in the same CODEOWNERS line.
+
 The attestation is only as honest as the machine that made it. The signing key
 is a file on that machine, and anything running there as you can sign with it;
 so can anything that runs your test suite as you. Nothing here protects
@@ -171,7 +191,7 @@ conviction: trust what was verified, never what was reported.
 
 | | |
 |---|---|
-| [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format |
+| [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format, input fingerprints included |
 | [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo |
 | [`sign/`](sign/) | the CI producer: `sign/action.yml` wraps `sign/sign.sh` |
 | [`verify.sh`](verify.sh) | the verifier the action runs. `git` and `ssh-keygen`, nothing else |

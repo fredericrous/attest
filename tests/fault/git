@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# A faulty git, for the fixtures that prove a fingerprint is never computed
+# from a git that failed. Prepended to PATH by tests/lib.sh's with_faulty_git;
+# everything but the injected failure is delegated to the real git, which is
+# named in ATTEST_REAL_GIT. ATTEST_FAULT selects the failure:
+#
+#   ls-tree   print the first record of the listing, then exit 1
+#   cat-file  make `cat-file blob …` exit 1 (`-e` and --batch-check untouched)
+#
+# Both implementations spawn `git` from PATH, so one wrapper serves both.
+real=${ATTEST_REAL_GIT:?}
+case "${ATTEST_FAULT:-}:$*" in
+    ls-tree:*" ls-tree "*|ls-tree:"ls-tree "*)
+        # -z output: records end in NUL. One record, then a failure after it.
+        "$real" "$@" | head -c 64
+        exit 1 ;;
+    cat-file:"cat-file blob "*|cat-file:*" cat-file blob "*)
+        exit 1 ;;
+esac
+exec "$real" "$@"

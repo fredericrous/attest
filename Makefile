@@ -9,7 +9,7 @@ lint: ## rustfmt + clippy + shellcheck
 	cargo fmt --all -- --check
 	cargo clippy --all-targets -- -D warnings
 	@if command -v shellcheck > /dev/null; then \
-	    shellcheck verify.sh sign/sign.sh tests/*.sh; \
+	    shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git; \
 	  else \
 	    echo "  (shellcheck not installed — skipped)"; \
 	  fi
@@ -41,15 +41,35 @@ conformance: ## run the fixtures against both implementations
 # on a multi-block note it reports block 1's gates or nothing, never a gate
 # from a later block. The shell copy is frozen in the tree; the binary is built
 # from the v1.1.0 tag, which a shallow CI checkout fetches on demand.
-compat: ## prove 1.1.0 verifiers degrade safely on multi-block notes
-	@echo "--- verify.sh 1.1.0 (frozen copy) ---"
+# The binary of a released tag, built into target/compat/<tag>/. A shallow CI
+# checkout fetches the tag on demand.
+define build_tag
+	@git rev-parse -q --verify $(1) > /dev/null 2>&1 || git fetch -q --depth 1 origin tag $(1)
+	@rm -rf target/compat/$(1)/src && mkdir -p target/compat/$(1)/src
+	@git archive $(1) | tar -x -C target/compat/$(1)/src
+	@cargo build -q --release --manifest-path target/compat/$(1)/src/Cargo.toml --target-dir target/compat/$(1)/target
+endef
+
+compat: ## prove released verifiers degrade safely on newer notes
+	@echo "--- multi-block notes: verify.sh 1.1.0 (frozen copy) ---"
 	@./tests/compat.sh "bash $(PWD)/tests/compat/verify-1.1.0.sh --quiet"
-	@echo "--- git-attest 1.1.0 (built from the tag) ---"
-	@git rev-parse -q --verify v1.1.0 > /dev/null 2>&1 || git fetch -q --depth 1 origin tag v1.1.0
-	@rm -rf target/compat/src && mkdir -p target/compat/src
-	@git archive v1.1.0 | tar -x -C target/compat/src
-	@cargo build -q --release --manifest-path target/compat/src/Cargo.toml --target-dir target/compat/target
-	@./tests/compat.sh "$(PWD)/target/compat/target/release/git-attest covered"
+	@echo "--- multi-block notes: git-attest 1.1.0 (built from the tag) ---"
+	$(call build_tag,v1.1.0)
+	@./tests/compat.sh "$(PWD)/target/compat/v1.1.0/target/release/git-attest covered"
+	@echo "--- input lines: verify.sh 1.1.0 (frozen copy) ---"
+	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.1.0.sh --quiet" old
+	@echo "--- input lines: git-attest 1.1.0 ---"
+	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.1.0/target/release/git-attest covered" old
+	@echo "--- input lines: verify.sh 1.2.0 (frozen copy) ---"
+	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.2.0.sh --quiet" old
+	@echo "--- input lines: git-attest 1.2.0 (built from the tag) ---"
+	$(call build_tag,v1.2.0)
+	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.2.0/target/release/git-attest covered" old
+	@echo "--- input lines: current verify.sh ---"
+	@./tests/compat-fields.sh "bash $(PWD)/verify.sh --quiet" new
+	@echo "--- input lines: current git-attest ---"
+	@cargo build -q --release
+	@./tests/compat-fields.sh "$(PWD)/target/release/git-attest covered" new
 
 sign-test: ## the producer's fixtures (sign/sign.sh against a bare origin)
 	@echo "--- sign/sign.sh ---"
