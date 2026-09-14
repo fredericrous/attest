@@ -254,6 +254,264 @@ check "the 32nd block is still read" "g1" "$R"
 raw_note "$R" "$(many 39)"
 check "the 40th block is not read" "" "$R"
 
+# --- input fingerprints (1.3.0) ---------------------------------------------
+# A committed spec names the paths a gate reads; the gate is then covered on
+# ANY tree whose declared inputs are byte-identical. Every fixture here moves
+# the tree (an unrelated commit) before checking, or the tree route would
+# answer and prove nothing.
+
+# A repository with sources, a spec naming them, and helpers for the cases.
+fp_repo() { # [spec-lines...]  (default: "test src Cargo.toml" and "lint src")
+    make_repo "$R" signer@example.org "$WORK/key"
+    mkdir -p "$R/src" "$R/docs" "$R/tests"
+    echo 'fn main() {}' > "$R/src/main.rs"; echo doc > "$R/docs/README.md"
+    echo '[package]' > "$R/Cargo.toml"; echo 'x' > "$R/tests/t.sh"
+    git -C "$R" add -A; git -C "$R" commit -q -m src
+    if [ $# -gt 0 ]; then printf '%s\n' "$@"; else printf 'test src Cargo.toml\nlint src\n'; fi | write_spec "$R"
+}
+# Attest `test` (and any other gates in $2) under its fingerprint key.
+attest_fp() { # gate [gates-in-payload] [inputs-override]
+    local g=$1 gates=${2:-$1} fp inputs
+    fp=$(fp_of "$R" "$g")
+    inputs=${3:-"$g=$fp"}
+    attach_input "$R" "$(payload_for "$R" "$gates" "$PLATFORM" "" "$inputs")" "$WORK/key" "$g" "$fp"
+}
+
+fp_repo; attest_fp test; move_tree "$R"
+check "fp: tree moved, declared inputs unchanged: covered" "test" "$R"
+check "fp: from a subdirectory, the same answer" "test" "$R/docs"
+
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" other "$PLATFORM" "" "other=$fp")" "$WORK/key" other "$fp"
+move_tree "$R"
+check "fp: a gate the spec does not declare is never looked up" "" "$R"
+
+fp_repo; attest_fp test
+echo 'fn main() { changed }' > "$R/src/main.rs"; git -C "$R" commit -qam src2
+check "fp: a declared file changed: nothing" "" "$R"
+
+fp_repo; attest_fp test
+printf '# a comment\ntest src Cargo.toml\nlint src\n' | write_spec "$R"
+check "fp: the spec edited (comment only): nothing" "" "$R"
+
+fp_repo; attest_fp test "test lint"; move_tree "$R"
+check "fp: block lists test and lint, claims test only: test only" "test" "$R"
+
+fp_repo
+fp=$(fp_of "$R" test)
+attach_note "$R" "$(payload_for "$R" "test lint" "$PLATFORM" "" "test=$fp")" "$WORK/key"
+check "fp: the same block via the tree key, tree equal: both gates" "test lint" "$R"
+
+fp_repo; attest_fp test lint; move_tree "$R"
+check "fp: a claim for a gate absent from gates buys nothing" "" "$R"
+
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$(printf 'a%.0s' $(seq 40))")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: block under K(fp1) whose payload claims fp2: nothing" "" "$R"
+
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" test "$PLATFORM")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: block under K with no input line: nothing" "" "$R"
+
+fp_repo
+fp=$(fp_of "$R" test)
+wrong=$(printf 'b%.0s' $(seq 40))
+body=$(sign_block "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$wrong")" "$WORK/key")
+raw_input_note "$R" "$(printf '%s' "$body" | sed "s/input test $wrong/input test $fp/")" test "$fp"
+move_tree "$R"
+check "fp: input line edited after signing: nothing" "" "$R"
+
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" test "$PLATFORM" | sed "/^platform /a\\
+input test $fp junk")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: an input line with a fourth field is not a claim" "" "$R"
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=${fp%?}")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: a 39-hex fingerprint is not a claim" "" "$R"
+
+# `--anywhere` composes: platform and inputs are independent filters.
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" test s390x-aix "" "test=$fp")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: foreign platform, matching inputs: nothing by default" "" "$R"
+check "fp: foreign platform, matching inputs, --anywhere: covered" "test" "$R" --anywhere test
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" test s390x-aix "" "test=$(printf 'c%.0s' $(seq 40))")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: --anywhere never rescues a wrong fingerprint" "" "$R" --anywhere test
+
+# The grammar: any violation invalidates the WHOLE spec. The fixture computes
+# the key the spec WOULD have used and proves nobody looks there.
+bad_spec() { # name spec-file   (a file, not a variable — a variable cannot hold
+    local name=$1 fp                #  a NUL — and not a pipe, which would run this in a
+    fp_repo                         #  subshell and lose the pass/fail counters)
+    write_spec "$R" < "$2"
+    fp=$(fp_of "$R" test 2> /dev/null) || fp=$(printf 'd%.0s' $(seq 40))
+    attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
+    move_tree "$R"
+    check "fp: invalid spec — $name" "" "$R"
+}
+printf 'test src Cargo.toml tests/*.sh\n' > "$WORK/badspec"
+bad_spec "a wildcard (ls-tree does not glob)" "$WORK/badspec"
+printf 'test src :!docs\n' > "$WORK/badspec"
+bad_spec "exclude magic" "$WORK/badspec"
+printf 'test src :(glob)src/*.rs\n' > "$WORK/badspec"
+bad_spec "glob magic" "$WORK/badspec"
+printf 'test :/src\n' > "$WORK/badspec"
+bad_spec "top magic" "$WORK/badspec"
+printf 'test ./src\n' > "$WORK/badspec"
+bad_spec "a ./ prefix" "$WORK/badspec"
+printf 'test /src\n' > "$WORK/badspec"
+bad_spec "an absolute path" "$WORK/badspec"
+printf 'test src/\n' > "$WORK/badspec"
+bad_spec "a trailing slash" "$WORK/badspec"
+printf 'test src/../src\n' > "$WORK/badspec"
+bad_spec "a .. component" "$WORK/badspec"
+printf 'test src\r\n' > "$WORK/badspec"
+bad_spec "a carriage return" "$WORK/badspec"
+printf 'test src\n# \000\n' > "$WORK/badspec"
+bad_spec "an embedded NUL" "$WORK/badspec"
+printf 'test src\n# caf\303\251\n' > "$WORK/badspec"
+bad_spec "a non-ASCII byte" "$WORK/badspec"
+printf 'test\302\240src\n' > "$WORK/badspec"
+bad_spec "a no-break space" "$WORK/badspec"
+printf 'test src\n# \001\n' > "$WORK/badspec"
+bad_spec "a control byte" "$WORK/badspec"
+printf 'test src\nlint/x src\n' > "$WORK/badspec"
+bad_spec "a gate name with a slash" "$WORK/badspec"
+printf 'test src\nlint\n' > "$WORK/badspec"
+bad_spec "a gate declaring no paths" "$WORK/badspec"
+printf 'test src\ntest Cargo.toml\n' > "$WORK/badspec"
+bad_spec "a duplicate gate" "$WORK/badspec"
+printf 'test src\n'; for i in $(seq 64); do printf 'g%s src\n' "$i"; done > "$WORK/badspec"
+bad_spec "65 gates" "$WORK/badspec"
+printf 'test src'; for _ in $(seq 64); do printf ' Cargo.toml'; done; printf '\n' > "$WORK/badspec"
+bad_spec "65 paths" "$WORK/badspec"
+printf 'test src\n'; head -c 65528 /dev/zero | tr '\0' '\n' > "$WORK/badspec"
+bad_spec "65537 bytes" "$WORK/badspec"
+# 65536 bytes, mostly newlines, is valid.
+fp_repo
+{ printf 'test src Cargo.toml\n'; head -c 65516 /dev/zero | tr '\0' '\n'; } | write_spec "$R"
+attest_fp test; move_tree "$R"
+check "fp: a 65536-byte spec of mostly newlines is valid" "test" "$R"
+# 64 gates and 64 paths are valid.
+fp_repo
+{ printf 'test src Cargo.toml\n'; for i in $(seq 63); do printf 'g%s src\n' "$i"; done; } | write_spec "$R"
+attest_fp test; move_tree "$R"
+check "fp: 64 gates are valid" "test" "$R"
+
+# A declared path deleted after signing: that gate loses its fingerprint, the
+# others keep theirs.
+fp_repo
+attest_fp test; attest_fp lint
+git -C "$R" rm -q Cargo.toml; git -C "$R" commit -qm rm
+check "fp: a declared path deleted: that gate loses its fingerprint, others keep it" "lint" "$R"
+
+# Both spec locations present: the route is disabled.
+fp_repo; attest_fp test
+printf 'test src Cargo.toml\nlint src\n' | write_spec "$R" .forgejo
+check "fp: both .forgejo and .github specs: nothing" "" "$R"
+# .forgejo alone works; and moving the SAME content to the other location
+# changes the fingerprint, which proves both paths are in the listing.
+make_repo "$R" signer@example.org "$WORK/key"
+mkdir -p "$R/src"; echo 'fn main() {}' > "$R/src/main.rs"; echo '[package]' > "$R/Cargo.toml"
+git -C "$R" add -A; git -C "$R" commit -q -m src
+printf 'test src Cargo.toml\n' | write_spec "$R" .forgejo
+attest_fp test; move_tree "$R"
+check "fp: a .forgejo spec works" "test" "$R"
+git -C "$R" mv -q .forgejo/attest-inputs .github/attest-inputs 2> /dev/null || { mkdir -p "$R/.github"; git -C "$R" mv .forgejo/attest-inputs .github/attest-inputs; }
+git -C "$R" commit -qm move
+check "fp: the same spec at the other location is a different fingerprint" "" "$R"
+
+# Modes, symlinks, directory boundaries, ancestor attributes.
+fp_repo; attest_fp test
+git -C "$R" update-index --chmod=+x Cargo.toml; git -C "$R" commit -qm chmod
+check "fp: a declared file's mode changed: nothing" "" "$R"
+if [ "$OS" != windows ]; then
+    fp_repo
+    ln -s main.rs "$R/src/link.rs"; git -C "$R" add -A; git -C "$R" commit -qm link
+    attest_fp test
+    rm "$R/src/link.rs"; ln -s ../Cargo.toml "$R/src/link.rs"; git -C "$R" add -A; git -C "$R" commit -qm retarget
+    check "fp: a declared symlink retargeted: nothing" "" "$R"
+fi
+fp_repo "test tests"; attest_fp test
+echo new > "$R/tests/new.sh"; git -C "$R" add -A; git -C "$R" commit -qm new
+check "fp: a file added inside a declared directory: nothing" "" "$R"
+fp_repo "test tests"; attest_fp test
+mkdir -p "$R/testsuite"; echo new > "$R/testsuite/new.sh"; git -C "$R" add -A; git -C "$R" commit -qm new
+check "fp: a directory that merely shares a prefix is not the declared one" "test" "$R"
+fp_repo; attest_fp test
+echo '* text=auto' > "$R/.gitattributes"; git -C "$R" add -A; git -C "$R" commit -qm attrs
+check "fp: a root .gitattributes added: nothing" "" "$R"
+make_repo "$R" signer@example.org "$WORK/key"
+mkdir -p "$R/crates/foo/src"; echo 'fn main() {}' > "$R/crates/foo/src/main.rs"
+git -C "$R" add -A; git -C "$R" commit -q -m src
+printf 'test crates/foo/src\n' | write_spec "$R"
+attest_fp test
+echo '* eol=crlf' > "$R/crates/.gitattributes"; git -C "$R" add -A; git -C "$R" commit -qm attrs
+check "fp: a .gitattributes at an ancestor of a declared path: nothing" "" "$R"
+
+# Fault injection: a git that fails must never yield a fingerprint.
+fp_repo; attest_fp test; move_tree "$R"
+check_faulty "fp: ls-tree failing after one record: nothing" ls-tree "" "$R"
+check_faulty "fp: cat-file failing to read the spec: nothing" cat-file "" "$R"
+
+# A sha256 repository: 64-hex trees, fingerprints and keys.
+if GIT_DEFAULT_HASH=sha256 git init -q "$WORK/probe256" 2> /dev/null; then
+    rm -rf "$WORK/probe256"
+    GIT_DEFAULT_HASH=sha256 fp_repo; attest_fp test; move_tree "$R"
+    check "fp: a sha256 repository" "test" "$R"
+fi
+
+# Caps and budget. Strangers are signed by a key in no file.
+fp_repo
+fp=$(fp_of "$R" test)
+stranger_block() { sign_block "$R" "$(payload_for "$R" "s$1" "$PLATFORM" "" "test=$fp")" "$WORK/other"; }
+valid_block=$(sign_block "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key")
+blocks() { local i; for i in $(seq "$1"); do stranger_block "$i"; printf '\n\n'; done; printf '%s' "$valid_block"; }
+raw_input_note "$R" "$(blocks 31)" test "$fp"; move_tree "$R"
+check "fp: the 32nd block under a fingerprint key is read" "test" "$R"
+raw_input_note "$R" "$(blocks 32)" test "$fp"
+check "fp: the 33rd block under a fingerprint key is not" "" "$R"
+# 64 distinct strangers across the tree note and the commit note spend the
+# budget before the valid block under the key is reached.
+fp_repo
+fp=$(fp_of "$R" test)
+valid_block=$(sign_block "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key")
+strangers() { local i; for i in $(seq "$1" "$2"); do stranger_block "$i"; [ "$i" -lt "$2" ] && printf '\n\n'; done; }
+raw_note "$R" "$(strangers 1 32)"
+raw_note "$R" "$(strangers 33 64)" HEAD
+raw_input_note "$R" "$valid_block" test "$fp"
+move_tree "$R"
+raw_note "$R" "$(strangers 1 32)"; raw_note "$R" "$(strangers 33 64)" HEAD
+check "fp: 64 verifications spend the budget before the key is reached" "" "$R"
+raw_note "$R" "$(strangers 33 63)" HEAD
+check "fp: 63 leave room for the valid block" "test" "$R"
+
+# A 1.2.0-shaped payload (no input line) on a moved tree: nothing.
+fp_repo
+attach_note "$R" "$(payload_for "$R" test "$PLATFORM")" "$WORK/key"
+move_tree "$R"
+check "fp: a payload without input lines on a moved tree: nothing" "" "$R"
+
+# Covered by both routes: listed once.
+fp_repo
+fp=$(fp_of "$R" test)
+attach_note "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key"
+attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
+check "fp: covered by tree and by fingerprint, listed once" "test" "$R"
+
 # --- the JSON shape the actions publish ------------------------------------
 if [ "${SKIP_JSON:-}" != 1 ]; then
     make_repo "$R" signer@example.org "$WORK/key"

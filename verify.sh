@@ -34,6 +34,7 @@ set -u
 
 FORMAT=amont-attest-v2
 NOTES_REF=amont-attest
+INPUTS_REF=amont-attest-inputs
 NAMESPACE=amont-attest
 
 signers=; principal=; platform=; anywhere=; quiet=; mode=plain
@@ -136,23 +137,24 @@ else
     [ -f "$signers" ] || uncovered "$signers does not exist"
 fi
 
-# The notes ref, from origin. A repository that has never been pushed with
+# A notes ref, from origin. A repository that has never been pushed with
 # attest enabled has no such ref, and that is not an error — but a fetch that
 # fails for any OTHER reason (no credentials because the checkout step set
 # persist-credentials: false, a remote not named origin, no network) is the
 # worst shape a fail-open can take: nothing covered, forever, with CI green and
 # a log that reads as "no attestation". So the two are told apart, and only the
 # second one is reported.
-fetch_notes() {
-    git fetch origin "+refs/notes/$NOTES_REF:refs/notes/$NOTES_REF" > /dev/null 2>&1 && return 0
+fetch_notes() { # ref
+    git fetch origin "+refs/notes/$1:refs/notes/$1" > /dev/null 2>&1 && return 0
     # ls-remote exits 2 when the ref simply is not there; anything else is the
     # remote being unreachable or refusing us.
-    git ls-remote --exit-code origin "refs/notes/$NOTES_REF" > /dev/null 2>&1; rc=$?
+    git ls-remote --exit-code origin "refs/notes/$1" > /dev/null 2>&1; rc=$?
     [ "$rc" -eq 2 ] && return 0
-    git rev-parse --verify --quiet "refs/notes/$NOTES_REF" > /dev/null 2>&1 && return 0
-    note "cannot fetch refs/notes/$NOTES_REF from origin and no local copy exists (no credentials on the checkout? remote not named origin?)"
+    git rev-parse --verify --quiet "refs/notes/$1" > /dev/null 2>&1 && return 0
+    note "cannot fetch refs/notes/$1 from origin and no local copy exists (no credentials on the checkout? remote not named origin?)"
 }
-fetch_notes
+fetch_notes "$NOTES_REF"
+fetch_notes "$INPUTS_REF"
 
 head_tree=$(git rev-parse 'HEAD^{tree}' 2> /dev/null) || uncovered "cannot resolve HEAD^{tree}"
 
@@ -170,11 +172,12 @@ if [ -z "$platform" ]; then
 fi
 
 # No suffix after the Xs: stock macOS mktemp does not substitute a template
-# whose Xs are not at the very end. It creates the literal `attest-XXXXXX.sig`,
-# and the next run finds it there and fails with "File exists" — so one killed
-# run on a self-hosted Mac would leave every later run uncovered, forever.
-sig_file=$(mktemp "${TMPDIR:-/tmp}/attest-XXXXXX") || uncovered "cannot create a temporary file"
-trap 'rm -f "$sig_file"' EXIT
+# whose Xs are not at the very end. It creates the literal name, and the next
+# run finds it there and fails with "File exists" — so one killed run on a
+# self-hosted Mac would leave every later run uncovered, forever.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/attest-XXXXXX") || uncovered "cannot create a temporary directory"
+trap 'rm -rf "$tmp"' EXIT
+sig_file=$tmp/sig
 
 # Read a payload field BY PREFIX, never by line position: the payload has grown
 # a line once already (v1 -> v2 added `platform`), and a positional reader
@@ -186,9 +189,11 @@ trap 'rm -f "$sig_file"' EXIT
 # this script.
 field() { printf '%s\n' "$2" | awk -v k="$1" '$1 == k { sub(/^[^ ]* */, ""); print; exit }'; }
 
-# How many blocks of one note are read. Every block costs two ssh-keygen runs,
-# and the notes ref is writable by anyone with push access.
+# How many blocks of one note are read, and how many signatures one run
+# verifies over every candidate. Every block costs two ssh-keygen runs, and
+# the notes refs are writable by anyone with push access.
 MAX_BLOCKS=32
+MAX_VERIFICATIONS=64
 CR=$(printf '\r')
 
 # A note holds one or more BLOCKS — payload, blank line, armored signature —
@@ -234,6 +239,9 @@ intersect() {
         END { o = ""; for (i = 1; i <= n; i++) if (g[i] in in2) o = o (o == "" ? "" : " ") g[i]; print o }'
 }
 
+# Is $1 one of the names in $2?
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 # Does an attestation minted on $2 satisfy the caller's $1? `any` takes all; a
 # value with a dash is an exact <arch>-<os>; an OS alone is compared to the
 # part after the LAST dash — never as a substring, so `inux` matches nothing.
@@ -245,31 +253,182 @@ platform_matches() {
     esac
 }
 
-# The TREE first: it is what the signature covers, so it is the only key that
-# survives a squash-merge, an amend or a rebase. HEAD and HEAD^2 follow for
-# notes written by an older producer that keyed by commit only — HEAD^2 because
-# a PR checkout is a merge commit whose second parent is the pushed tip.
+# ---------------------------------------------------------------------------
+# Input fingerprints (1.3.0). SPEC.md, "Input fingerprints".
 #
-# A producer writes its note to BOTH the tree and the commit, so the loop meets
-# the same note twice; it is judged once, by its oid.
-covered=; seen=; tried=
-for candidate in "$head_tree" HEAD HEAD^2; do
-    object=$(git rev-parse --verify --quiet "$candidate" 2> /dev/null) || continue
-    note_oid=$(git notes --ref "$NOTES_REF" list "$object" 2> /dev/null) || continue
+# A committed `.github/attest-inputs` (or `.forgejo/`) names the paths each
+# gate reads. A gate's FINGERPRINT on a tree is `git hash-object` over the
+# `git ls-tree -r -z --full-tree` listing of those paths (plus a few implicit
+# ones, the spec file itself first). Equal fingerprints mean identical inputs,
+# so an attestation covers the gate on any tree whose fingerprint is equal —
+# a docs commit or another package no longer invalidates it. Producers attach
+# their block, in a second notes ref, under a synthetic key derived from
+# (gate, fingerprint), which is where this looks for it.
+# ---------------------------------------------------------------------------
+
+# The spec at HEAD's tree, parsed into "$tmp/spec.gates": one `gate<TAB>paths`
+# line per gate. Read from the TREE (`cat-file`), never the working copy, into
+# a FILE, never a variable: a variable cannot hold a NUL and drops trailing
+# newlines, and the contract is checked on the raw bytes. Sets spec_ok=1 when
+# there is a usable spec; says why when there is one and it is not.
+spec_ok=
+load_spec() {
+    local present='' p n bad
+    for p in .forgejo/attest-inputs .github/attest-inputs; do
+        git -C "$root" cat-file -e "$head_tree:$p" 2> /dev/null && present="$present $p"
+    done
+    # shellcheck disable=SC2086  # the list is built from fixed names
+    set -- $present
+    [ $# -gt 0 ] || return 0
+    if [ $# -gt 1 ]; then
+        note "both .forgejo/attest-inputs and .github/attest-inputs exist; input fingerprints disabled"
+        return 0
+    fi
+    p=$1
+    if ! git -C "$root" cat-file blob "$head_tree:$p" > "$tmp/spec" 2> /dev/null; then
+        note "cannot read $p from HEAD's tree; input fingerprints disabled"
+        return 0
+    fi
+    n=$(wc -c < "$tmp/spec" | tr -d ' ')
+    if [ "$n" -gt 65536 ]; then
+        note "$p is larger than 65536 bytes; input fingerprints disabled"
+        return 0
+    fi
+    # Every byte must be printable ASCII, space, tab or LF: delete exactly
+    # those and anything left — a NUL, a CR, a control byte, anything
+    # non-ASCII — is a violation.
+    bad=$(LC_ALL=C tr -d ' \t\n!-~' < "$tmp/spec" | wc -c | tr -d ' ')
+    if [ "$bad" -ne 0 ]; then
+        note "$p contains a byte that is not printable ASCII, space, tab or LF; input fingerprints disabled"
+        return 0
+    fi
+    # The grammar, one rule per message, any violation invalidating the WHOLE
+    # spec: a line that silently dropped out would be one the author believes
+    # is protecting something. Same rules as parse_spec() in src/attest.rs.
+    if ! awk '
+        function bad(why) { printf "line %d: %s\n", NR, why > "/dev/stderr"; exit 1 }
+        { sub(/^[ \t]+/, ""); if ($0 == "" || substr($0, 1, 1) == "#") next }
+        {
+            g = $1
+            if (g !~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ || length(g) > 64) bad("gate name `" g "` is not [A-Za-z0-9][A-Za-z0-9._-]* of at most 64 characters")
+            if (g in seen) bad("gate `" g "` is declared twice")
+            seen[g] = 1
+            if (NF < 2) bad("gate `" g "` declares no paths")
+            if (NF - 1 > 64) bad("gate `" g "` declares more than 64 paths")
+            line = g
+            for (i = 2; i <= NF; i++) {
+                t = $i
+                if (substr(t, 1, 1) == ":") bad("path `" t "` starts with `:` (pathspec magic is not allowed)")
+                if (substr(t, 1, 1) == "/") bad("path `" t "` is absolute; paths are relative to the repository root")
+                if (substr(t, 1, 2) == "./" || substr(t, 1, 3) == "../") bad("path `" t "` starts with `./` or `../`")
+                if (substr(t, length(t), 1) == "/") bad("path `" t "` ends with `/`; name the directory without it")
+                if (t ~ /[*?\[\]\\]/) bad("path `" t "` contains a wildcard; git ls-tree does not glob, only literal paths are accepted")
+                m = split(t, c, "/")
+                for (j = 1; j <= m; j++) if (c[j] == "" || c[j] == "." || c[j] == "..") bad("path `" t "` has an empty, `.` or `..` component")
+                line = line (i == 2 ? "\t" : " ") t
+            }
+            print line
+            if (++gates > 64) bad("declares more than 64 gates")
+        }' "$tmp/spec" > "$tmp/spec.gates" 2> "$tmp/spec.err"; then
+        note "$p $(sed -n 1p "$tmp/spec.err"); input fingerprints disabled"
+        return 0
+    fi
+    spec_ok=1
+}
+load_spec
+
+# The paths of gate $1 per the spec, space-separated, or nothing.
+spec_paths() { awk -F '\t' -v g="$1" '$1 == g { print $2; exit }' "$tmp/spec.gates"; }
+
+# The fingerprint of gate $1 on HEAD's tree, memoised in "$tmp/fp.<gate>":
+# the oid, or an empty file when the gate has none here (not in the spec, a
+# path that does not exist, git failing at any step). fp_head prints it.
+fp_head() {
+    local g=$1 paths tok listing_rc
+    if [ ! -f "$tmp/fp.$g" ]; then
+        : > "$tmp/fp.$g"
+        paths=$(spec_paths "$g")
+        if [ -n "$paths" ]; then
+            # Every declared path must resolve — one `cat-file --batch-check`
+            # for all of them, never a process per path.
+            # shellcheck disable=SC2086  # declared paths never contain blanks (the grammar refuses them)
+            set -- $paths
+            if ! for tok in "$@"; do printf '%s:%s\n' "$head_tree" "$tok"; done \
+                | git -C "$root" cat-file --batch-check 2> /dev/null \
+                | awk -v want="$#" '/ missing$/ { m = 1 } { n++ } END { exit (m || n != want) }'; then
+                :
+            else
+                # The implicit paths: both spec locations (so adding, removing
+                # or editing either invalidates), .gitmodules, and
+                # .gitattributes at the root and at every ancestor directory
+                # of every declared path. Then the declared paths. The listing
+                # goes to a FILE: a variable would strip the NULs, and the
+                # exit status of ls-tree is checked before anything is hashed,
+                # because a listing that ended early must never fingerprint.
+                # shellcheck disable=SC2046,SC2086  # same: blank-free tokens, deliberately split
+                set -- .forgejo/attest-inputs .github/attest-inputs .gitmodules \
+                    $(for tok in $paths; do printf '.gitattributes\n'; d=${tok%/*}; while [ "$d" != "$tok" ]; do printf '%s/.gitattributes\n' "$d"; tok=$d; d=${tok%/*}; done; done | sort -u) \
+                    $paths
+                git -C "$root" ls-tree -r -z --full-tree "$head_tree" -- "$@" > "$tmp/listing" 2> /dev/null; listing_rc=$?
+                if [ "$listing_rc" -eq 0 ] && [ -s "$tmp/listing" ]; then
+                    git hash-object --stdin < "$tmp/listing" 2> /dev/null > "$tmp/fp.$g" || : > "$tmp/fp.$g"
+                fi
+            fi
+        fi
+    fi
+    cat "$tmp/fp.$g"
+}
+
+# The fingerprint a block claims for gate $2 in payload $1: an `input <gate>
+# <fp>` line of exactly three fields, first occurrence wins.
+input_fp() {
+    printf '%s\n' "$1" | awk -v g="$2" \
+        'NF == 3 && $1 == "input" && $2 == g && $3 ~ /^[0-9a-f]+$/ && (length($3) == 40 || length($3) == 64) { print $3; exit }'
+}
+
+# The synthetic note key for (gate, fingerprint).
+input_key() { printf 'amont-attest-input %s %s\n' "$1" "$2" | git hash-object --stdin 2> /dev/null; }
+
+# The uniform rule, per gate: those names of $2 that the block covers, given
+# whether its tree is the checked-out one ($1) and its payload ($3).
+kept_gates() {
+    local tree_matches=$1 gates=$2 payload=$3 g out='' claimed here
+    for g in $gates; do
+        if [ "$tree_matches" = yes ]; then
+            out=$(union "$out" "$g")
+        else
+            claimed=$(input_fp "$payload" "$g")
+            [ -n "$claimed" ] || continue
+            here=$(fp_head "$g")
+            [ -n "$here" ] && [ "$claimed" = "$here" ] && out=$(union "$out" "$g")
+        fi
+    done
+    printf '%s\n' "$out"
+}
+
+# Judge every block of the note on object $2 in ref $1, labelled $3.
+# Accumulates into $covered; a note seen before is skipped by its oid, a
+# block seen before by its bytes (its verdict depends only on its content and
+# HEAD, whichever note it appears in).
+covered=; seen=; seen_blocks=; tried=; verifications=0; exhausted=
+judge_note() {
+    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted
+    [ -z "$exhausted" ] || return 0
+    note_oid=$(git notes --ref "$nref" list "$object" 2> /dev/null) || return 0
     note_oid=${note_oid%% *}
-    case " $seen " in *" $note_oid "*) continue ;; esac
+    in_list "$note_oid" "$seen" && return 0
     seen="$seen $note_oid"
-    body=$(git notes --ref "$NOTES_REF" show "$object" 2> /dev/null) || continue
+    body=$(git notes --ref "$nref" show "$object" 2> /dev/null) || return 0
     tried=yes
 
     # LF only. Checked by the shell itself, before any tool sees the note:
     # the awk and sed of some environments (MSYS, hence Git Bash on Windows)
     # drop carriage returns on the way in, which would let a CRLF note parse
     # here and be refused by the binary.
-    case $body in *"$CR"*) note "note on $candidate contains carriage returns; the format is LF-only"; continue ;; esac
+    case $body in *"$CR"*) note "note on $at contains carriage returns; the format is LF-only"; return 0 ;; esac
 
     ranges=$(blocks_of "$body")
-    [ -n "$ranges" ] || { note "note on $candidate carries no signature block"; continue; }
+    [ -n "$ranges" ] || { note "note on $at carries no signature block"; return 0; }
     nblocks=$(printf '%s\n' "$ranges" | awk '/^[0-9]/ { c++ } END { print c + 0 }')
 
     # A heredoc, not a pipe: a `printf | while` would run the loop in a
@@ -278,12 +437,12 @@ for candidate in "$head_tree" HEAD HEAD^2; do
     while read -r ps pe ss se; do
         [ -n "$ps" ] || continue
         if [ "$ps" = truncated ]; then
-            note "note on $candidate has more than $MAX_BLOCKS blocks; the rest were ignored"
+            note "note on $at has more than $MAX_BLOCKS blocks; the rest were ignored"
             continue
         fi
         n=$((n + 1))
-        at=$candidate
-        [ "$nblocks" -gt 1 ] && at="$candidate block $n"
+        where=$at
+        [ "$nblocks" -gt 1 ] && where="$at block $n"
 
         # The payload's trailing newline is part of the signed bytes; sed
         # prints whole lines, so it is there.
@@ -291,7 +450,7 @@ for candidate in "$head_tree" HEAD HEAD^2; do
         printf '%s\n' "$body" | sed -n "${ss},${se}p" > "$sig_file"
 
         [ "$(printf '%s\n' "$payload" | sed -n 1p)" = "$FORMAT" ] || {
-            note "note on $at is not $FORMAT (a newer producer wrote it; running the tests)"
+            note "note on $where is not $FORMAT (a newer producer wrote it; running the tests)"
             continue
         }
 
@@ -302,11 +461,21 @@ for candidate in "$head_tree" HEAD HEAD^2; do
         # Every v2 field is required, `platform` included: a note that does
         # not say where it ran is not evidence about anywhere.
         if [ -z "$tree" ] || [ -z "$ran_on" ]; then
-            note "note on $at is missing a required field (tree, platform)"
+            note "note on $where is missing a required field (tree, platform)"
             continue
         fi
-        [ "$tree" = "$head_tree" ] || { note "attested tree $tree is not the checked-out tree $head_tree"; continue; }
         [ -n "$gates" ] || { note "attestation lists no gates"; continue; }
+
+        # The same block reached through another key has the same verdict.
+        bh=$(printf '%s\n' "$payload" | cat - "$sig_file" | git hash-object --stdin 2> /dev/null)
+        in_list "$bh" "$seen_blocks" && continue
+        seen_blocks="$seen_blocks $bh"
+        if [ "$verifications" -ge "$MAX_VERIFICATIONS" ]; then
+            note "the budget of $MAX_VERIFICATIONS signature verifications is spent; remaining candidates were not read"
+            exhausted=1
+            return 0
+        fi
+        verifications=$((verifications + 1))
 
         # WHO signed, read from the signature and the file rather than
         # guessed. `ssh-keygen -Y verify` requires a principal and checks it
@@ -317,37 +486,77 @@ for candidate in "$head_tree" HEAD HEAD^2; do
         signer=$principal
         if [ -z "$signer" ]; then
             signer=$(ssh-keygen -Y find-principals -s "$sig_file" -f "$signers" 2> /dev/null | sed -n 1p)
-            [ -n "$signer" ] || { note "signature on $at was not made by any key in $signers"; continue; }
+            [ -n "$signer" ] || { note "signature on $where was not made by any key in $signers"; continue; }
         fi
 
-        # The signature BEFORE the platform: `--anywhere` may only admit gates
-        # from a block that actually verified.
+        # The signature BEFORE anything the block's claims could buy it:
+        # `--anywhere` and the input fingerprints may only admit gates from a
+        # block that actually verified.
         printf '%s\n' "$payload" | ssh-keygen -Y verify -f "$signers" \
             -I "$signer" -n "$NAMESPACE" -s "$sig_file" > /dev/null 2>&1 || {
-            note "signature on $at does not verify as $signer against $signers"
+            note "signature on $where does not verify as $signer against $signers"
             continue
         }
+
+        # The uniform rule, per gate: the tree is the checked-out tree, or the
+        # block's fingerprint for that gate is the one computed here.
+        if [ "$tree" = "$head_tree" ]; then
+            kept=$(kept_gates yes "$gates" "$payload"); how=
+        else
+            kept=$(kept_gates no "$gates" "$payload"); how=" (by input fingerprint)"
+        fi
+        if [ -z "$kept" ]; then
+            note "attested tree $tree is not the checked-out tree $head_tree and no input fingerprint of $where matches"
+            continue
+        fi
 
         # A pass is a pass ON SOMETHING: a macOS `cargo test` is no evidence
         # about the Windows leg. `--platform any` is the deliberate, committed
         # statement that the whole suite's result does not depend on where it
         # ran; `--anywhere` says it of the named gates only.
         if platform_matches "$platform" "$ran_on"; then
-            covered=$(union "$covered" "$gates")
-            note "covered by $signer on $ran_on: $gates"
+            covered=$(union "$covered" "$kept")
+            note "covered by $signer on $ran_on$how: $kept"
             continue
         fi
-        accepted=$(intersect "$gates" "$anywhere")
+        accepted=$(intersect "$kept" "$anywhere")
         covered=$(union "$covered" "$accepted")
         if [ -n "$accepted" ]; then
-            note "attested on $ran_on by $signer, this leg is $platform; accepted anywhere: $accepted"
+            note "attested on $ran_on by $signer$how, this leg is $platform; accepted anywhere: $accepted"
         else
-            note "attested on $ran_on by $signer, this leg is $platform"
+            note "attested on $ran_on by $signer$how, this leg is $platform"
         fi
     done <<EOF
 $ranges
 EOF
+}
+
+# The TREE first: it is what the signature covers, so it is the only key that
+# survives a squash-merge, an amend or a rebase. HEAD and HEAD^2 follow for
+# notes written by an older producer that keyed by commit only — HEAD^2 because
+# a PR checkout is a merge commit whose second parent is the pushed tip.
+for candidate in "$head_tree" HEAD HEAD^2; do
+    object=$(git rev-parse --verify --quiet "$candidate" 2> /dev/null) || continue
+    judge_note "$NOTES_REF" "$object" "$candidate"
 done
+
+# Then, lazily, the fingerprint-keyed notes: only for gates the spec declares
+# and nothing above covered. The common case (the tree matched) costs nothing.
+if [ -n "$spec_ok" ]; then
+    while IFS="$(printf '\t')" read -r g _; do
+        [ -n "$g" ] || continue
+        [ -z "$exhausted" ] || break
+        in_list "$g" "$covered" && continue
+        fp=$(fp_head "$g")
+        if [ -z "$fp" ]; then
+            note "gate $g: no fingerprint here (a declared path does not exist in this tree)"
+            continue
+        fi
+        k=$(input_key "$g" "$fp") || continue
+        [ -n "$k" ] || continue
+        judge_note "$INPUTS_REF" "$k" "input $g $(printf '%s' "$fp" | cut -c1-12)"
+    done < "$tmp/spec.gates"
+fi
 
 [ -n "$tried" ] || note "no attestation found for tree $head_tree"
 emit "$covered"

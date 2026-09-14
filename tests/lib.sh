@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Shared by tests/conformance.sh, tests/compat.sh and tests/sign.sh. Sourced,
 # not run. The caller sets WORK (a scratch directory it removes on exit) and
 # IMPL (the implementation command line) before sourcing.
@@ -41,9 +42,12 @@ make_repo() { # dir principal keyfile [principal2 keyfile2]
     git -C "$dir" commit -q -m init
 }
 
-payload_for() { # dir gates platform [format]
-    printf 'amont-attest-v2\ntree %s\ngates %s\nplatform %s\namont 1.23.0\n' \
-        "$(git -C "$1" rev-parse 'HEAD^{tree}')" "$2" "$3" | sed "1s/.*/${4:-amont-attest-v2}/"
+payload_for() { # dir gates platform [format] [inputs "gate=fp ..."]
+    local kv
+    printf '%s\ntree %s\ngates %s\nplatform %s\n' \
+        "${4:-amont-attest-v2}" "$(git -C "$1" rev-parse 'HEAD^{tree}')" "$2" "$3"
+    for kv in ${5:-}; do printf 'input %s %s\n' "${kv%%=*}" "${kv#*=}"; done
+    printf 'amont 1.23.0\n'
 }
 
 # Sign `payload` with `keyfile` and print the BLOCK: payload, a blank line, the
@@ -134,4 +138,101 @@ check_usage() { # name dir [flags...]
 summary() {
     printf '\n  %s passed, %s failed\n' "$PASS" "$FAIL"
     [ "$FAIL" -eq 0 ] || { printf '  failing:%b\n' "$FAILED_CASES"; exit 1; }
+}
+
+# --- input fingerprints (1.3.0) ---------------------------------------------
+
+# The spec, from stdin, committed as `.github/attest-inputs` (or under $2).
+write_spec() { # dir [.github|.forgejo] < spec
+    local dir=$1 where=${2:-.github}
+    mkdir -p "$dir/$where"
+    cat > "$dir/$where/attest-inputs"
+    git -C "$dir" add -A "$where/attest-inputs"
+    git -C "$dir" commit -q -m spec
+}
+
+# An unrelated commit, so HEAD^{tree} changes while every declared input stays.
+# Every fingerprint fixture must call it, or the tree route answers and the
+# fixture proves nothing.
+move_tree() { # dir
+    printf 'moved %s\n' "$RANDOM$RANDOM" >> "$1/UNRELATED.md"
+    git -C "$1" add UNRELATED.md
+    git -C "$1" commit -q -m unrelated
+}
+
+# The fingerprint of `gate` on the HEAD tree (or `tree`), as SPEC.md defines
+# it — the fixture-side reference: implicit paths, then the declared ones,
+# listed with ls-tree and hashed with hash-object. Does NOT validate the
+# spec, so a fixture can compute the key an invalid spec WOULD have used and
+# prove a verifier refuses to look there.
+fp_of() { # dir gate [tree]
+    local dir=$1 g=$2 tree=${3:-} paths tok d where
+    [ -n "$tree" ] || tree=$(git -C "$dir" rev-parse 'HEAD^{tree}')
+    for where in .forgejo .github; do
+        paths=$(git -C "$dir" cat-file blob "$tree:$where/attest-inputs" 2> /dev/null \
+            | awk -v g="$g" '$1 == g { $1 = ""; sub(/^ +/, ""); print; exit }')
+        [ -n "$paths" ] && break
+    done
+    [ -n "$paths" ] || return 1
+    # shellcheck disable=SC2046,SC2086
+    set -- .forgejo/attest-inputs .github/attest-inputs .gitmodules \
+        $(for tok in $paths; do printf '.gitattributes\n'; d=${tok%/*}; while [ "$d" != "$tok" ]; do printf '%s/.gitattributes\n' "$d"; tok=$d; d=${tok%/*}; done; done | sort -u) \
+        $paths
+    git -C "$dir" ls-tree -r -z --full-tree "$tree" -- "$@" 2> /dev/null | git -C "$dir" hash-object --stdin
+}
+
+# The synthetic note key for (gate, fingerprint).
+input_key() { # dir gate fp
+    printf 'amont-attest-input %s %s\n' "$2" "$3" | git -C "$1" hash-object --stdin
+}
+
+# A signed block APPENDED under K(gate, fp) in the inputs ref.
+attach_input() { # dir payload keyfile gate fp
+    local dir=$1 payload=$2 keyfile=$3 k
+    k=$(input_key "$dir" "$4" "$5")
+    git -C "$dir" notes --ref amont-attest-inputs append \
+        -m "$(sign_block "$dir" "$payload" "$keyfile")" "$k" 2> /dev/null
+}
+
+# Arbitrary bytes as the note under K(gate, fp), verbatim.
+raw_input_note() { # dir content gate fp
+    local dir=$1 content=$2 k blob
+    k=$(input_key "$dir" "$3" "$4")
+    blob=$(printf '%s' "$content" | git -C "$dir" hash-object -w --stdin --no-filters)
+    git -C "$dir" notes --ref amont-attest-inputs add -f -C "$blob" "$k" 2> /dev/null
+}
+
+# Like `check`, with a git that fails on purpose (tests/fault/git) first on
+# PATH. Both implementations spawn `git` from PATH — except the Rust binary
+# on Windows, whose process launcher will not run an extension-less script;
+# there the fixture is SKIPPED, visibly, rather than passed vacuously.
+check_faulty() { # name mode expected-stdout dir [flags...]
+    local name=$1 mode=$2 want=$3 dir=$4; shift 4
+    local oldpath=$PATH probe
+    case "$IMPL" in
+        bash*) ;;
+        *) if [ "$OS" = windows ]; then
+               printf '  SKIP  %s (the faulty-git wrapper cannot reach a native binary on Windows)\n' "$name"
+               return 0
+           fi ;;
+    esac
+    # A fresh copy with LF endings and the executable bit: a checkout may have
+    # given the wrapper neither (autocrlf, core.filemode), and a wrapper that
+    # is not reached makes the case pass for the wrong reason.
+    mkdir -p "$WORK/fault"
+    tr -d '\r' < "$LIB_DIR/fault/git" > "$WORK/fault/git"
+    chmod +x "$WORK/fault/git"
+    ATTEST_REAL_GIT=$(command -v git); export ATTEST_REAL_GIT
+    PATH="$WORK/fault:$PATH"
+    probe=$(ATTEST_FAULT=probe git --version 2> /dev/null)
+    if [ "$probe" != attest-faulty-git ]; then
+        PATH=$oldpath
+        printf '  SKIP  %s (the faulty-git wrapper is not reached on this platform: got %s)\n' "$name" "[$probe]"
+        return 0
+    fi
+    ATTEST_FAULT=$mode; export ATTEST_FAULT
+    run_impl "$dir" "$@"
+    PATH=$oldpath; unset ATTEST_FAULT ATTEST_REAL_GIT
+    if [ "$GOT" = "$want" ] && [ "$RC" -eq 0 ]; then ok "$name"
+    else fail "$name" "$(printf 'want %-28s got %s (exit %s)' "[$want]" "[$GOT]" "$RC")"; fi
 }
