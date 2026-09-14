@@ -38,7 +38,10 @@
 # would launder another platform's result into this one).
 #
 # Depends on `git` and `ssh-keygen` only. See SPEC.md, "Producing".
-set -u
+#
+# `-f`: no filesystem globbing, for the same reason as verify.sh — gate names
+# and declared paths are word-split on purpose and must stay literal.
+set -uf
 
 FORMAT=amont-attest-v2
 NOTES_REF=amont-attest
@@ -159,7 +162,15 @@ fi
 
 # The honesty guard. Modified OR untracked (non-ignored) files mean the checks
 # ran on something other than HEAD^{tree}; ignored build output does not.
-if [ -z "$allow_dirty" ] && [ -n "$(git status --porcelain 2> /dev/null)" ]; then
+# Explicit flags, so a `status.showUntrackedFiles=no` or
+# `diff.ignoreSubmodules` in someone's config cannot hide either; and a
+# status that FAILS (a corrupt index, say) is not a clean tree — it is a tree
+# nobody can vouch for.
+if ! git status --porcelain --untracked-files=normal --ignore-submodules=none > "$tmp/status" 2> /dev/null; then
+    say "git status failed; cannot tell whether the checks ran on HEAD^{tree}; refusing to sign"
+    finish error false false
+fi
+if [ -z "$allow_dirty" ] && [ -s "$tmp/status" ]; then
     say "the working tree has modified or untracked files, so the checks did not run on HEAD^{tree} alone; refusing to sign (--allow-dirty overrides)"
     finish dirty false false
 fi
@@ -331,7 +342,10 @@ publish() { # ref object...
             echo already-present; return
         fi
         if git push --quiet "$remote" "refs/notes/$tref:refs/notes/$ref" 2> "$tmp/err"; then
-            # The local ref follows what was just published.
+            # The local ref follows what was just published — carrying along
+            # any block that existed only locally (a --no-push run), which a
+            # plain replacement would have dropped.
+            absorb_local "$ref" "$tref"
             git update-ref "refs/notes/$ref" "refs/notes/$tref" 2> /dev/null
             git update-ref -d "refs/notes/$tref" 2> /dev/null
             echo pushed; return
@@ -350,6 +364,31 @@ publish() { # ref object...
                 say "push of refs/notes/$ref refused: $why"
                 echo push-failed; return ;;
         esac
+    done
+}
+
+# Every block on the LOCAL ref $1 that the temporary ref $2 lacks, appended
+# there, so setting the local ref to the temporary one loses nothing — a
+# --no-push run's block would otherwise vanish on the next successful push.
+# Blocks are split on the END marker; one is "present" when its exact bytes
+# are. The loops run in pipeline subshells, which is fine: they only call git.
+absorb_local() { # ref tref
+    local ref=$1 tref=$2 obj local_body tmp_body from to lblock
+    git rev-parse --verify --quiet "refs/notes/$ref" > /dev/null 2>&1 || return 0
+    git notes --ref "$ref" list 2> /dev/null | while read -r _ obj; do
+        [ -n "$obj" ] || continue
+        local_body=$(git notes --ref "$ref" show "$obj" 2> /dev/null) || continue
+        tmp_body=$(git notes --ref "$tref" show "$obj" 2> /dev/null)
+        # "from to" line ranges: from the first non-blank line after the
+        # previous END marker to the next END marker.
+        printf '%s\n' "$local_body" | awk -v e='-----END SSH SIGNATURE-----' '
+            !s && $0 != "" { s = NR }
+            s && $0 == e { print s, NR; s = 0 }' | while read -r from to; do
+            lblock=$(printf '%s\n' "$local_body" | sed -n "${from},${to}p")
+            [ -n "$lblock" ] || continue
+            case $tmp_body in *"$lblock"*) continue ;; esac
+            gitw notes --ref "$tref" append -m "$lblock" "$obj" 2> /dev/null
+        done
     done
 }
 

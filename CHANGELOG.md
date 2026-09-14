@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+Three findings from a review of 1.3.0, all with fixtures now.
+
+- **A wildcard gate name could cover a gate nobody signed.** `verify.sh`
+  word-split the signed gate list with globbing on, so a gate called
+  `pre-push-*` next to a file called `pre-push-cargo-test` became that
+  file's name. Both scripts now run with globbing off; the binary was
+  already literal.
+- **The producer's clean-tree guard could be hidden or fail open.**
+  `status.showUntrackedFiles=no` hid untracked files, `diff.ignoreSubmodules`
+  hid submodule changes, and a `git status` that failed (a corrupt index)
+  read as clean. The guard now passes explicit flags for both and refuses to
+  sign, `--allow-dirty` or not, when status fails.
+- **A successful push dropped local-only blocks.** Publishing replaced the
+  local notes ref with the remote-derived one, so a block written by a
+  `--no-push` run vanished on the next push. Local blocks the remote lacks
+  are now carried into the updated ref, on both refs.
+
 ## 1.3.0
 
 - **Input fingerprints.** A committed `.github/attest-inputs` (or

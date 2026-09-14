@@ -207,6 +207,41 @@ mkdir -p "$R/build"; echo out > "$R/build/artifact"
 sign "$WORK/key" --gates ci-fmt
 expect "ignored build output is not dirt" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt|inputs=0/0"
 
+# The guard cannot be hidden by config, and a status that fails is not clean.
+make_remote_repo
+git -C "$R" config status.showUntrackedFiles no
+echo new > "$R/hidden.txt"
+sign "$WORK/key" --gates ci-fmt
+expect "status.showUntrackedFiles=no does not hide an untracked file" 0 "status=dirty|signed=false|pushed=false|gates=ci-fmt|inputs=0/0"
+rm -f "$R/hidden.txt"; git -C "$R" config --unset status.showUntrackedFiles
+sub=$WORK/subrepo; rm -rf "$sub"; git init -q "$sub"; git -C "$sub" config core.hooksPath /dev/null
+git -C "$sub" config user.email a@b.c; git -C "$sub" config user.name a
+echo s > "$sub/s.txt"; git -C "$sub" add -A; git -C "$sub" commit -q -m s
+if git -C "$R" -c protocol.file.allow=always submodule add -q "$sub" sub 2> /dev/null; then
+    git -C "$R" commit -q -m submodule
+    git -C "$R" config diff.ignoreSubmodules all
+    echo changed > "$R/sub/s.txt"
+    sign "$WORK/key" --gates ci-fmt
+    expect "a modified submodule is dirt, whatever diff.ignoreSubmodules says" 0 "status=dirty|signed=false|pushed=false|gates=ci-fmt|inputs=0/0"
+    git -C "$R" config --unset diff.ignoreSubmodules
+fi
+make_remote_repo
+printf 'not an index' > "$R/.git/index"
+sign "$WORK/key" --gates ci-fmt
+expect "a failing git status refuses to sign, even with --allow-dirty" 0 "status=error|signed=false|pushed=false|gates=ci-fmt|inputs=0/0"
+sign "$WORK/key" --gates ci-fmt --allow-dirty
+expect "...--allow-dirty does not override a failing status" 0 "status=error|signed=false|pushed=false|gates=ci-fmt|inputs=0/0"
+
+# A block that exists only locally survives a later successful push: the
+# local ref ends up holding both, the remote only what was pushed.
+make_remote_repo
+sign "$WORK/key" --gates local-gate --no-push
+expect "a local-only block first" 0 "status=local|signed=true|pushed=false|gates=local-gate|inputs=0/0"
+sign "$WORK/key" --gates pushed-gate
+expect "then a pushed one" 0 "status=pushed|signed=true|pushed=true|gates=pushed-gate|inputs=0/0"
+assert_eq "the local ref kept the local-only block" "$(local_blocks)" 2
+assert_eq "the remote holds only the pushed one" "$(remote_blocks)" 1
+
 # --- --object --------------------------------------------------------------
 make_remote_repo
 sign "$WORK/key" --gates ci-fmt --object HEAD
@@ -310,5 +345,15 @@ expect "spec: the next run repairs the key" 0 "status=already-present|signed=fal
 assert_eq "spec: ...and the key now holds the block" "$(remote_input_blocks ci-fmt "$fp_fmt")" 1
 assert_eq "spec: ...while the main ref did not grow" "$(remote_blocks)" 1
 assert_eq "spec: no temporary ref left behind" "$(git -C "$R" for-each-ref 'refs/notes/attest-sign-*')" ""
+
+# A local-only block on the inputs ref survives a later push there too.
+spec_repo
+fp_fmt=$(fp_of "$R" ci-fmt); fp_lint=$(fp_of "$R" ci-lint)
+sign "$WORK/key" --gates ci-lint --no-push
+sign "$WORK/key" --gates ci-fmt
+expect "inputs: a pushed block after a local-only one" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt|inputs=1/1"
+assert_eq "inputs: the local-only key survived" \
+    "$(git -C "$R" notes --ref amont-attest-inputs show "$(input_key "$R" ci-lint "$fp_lint")" 2> /dev/null | count_blocks)" 1
+assert_eq "inputs: the pushed key is there too" "$(remote_input_blocks ci-fmt "$fp_fmt")" 1
 
 summary
