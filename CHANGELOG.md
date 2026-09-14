@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0
 
 - **Input fingerprints.** A committed `.github/attest-inputs` (or
   `.forgejo/`) names the paths each gate reads. A gate is then covered by an
