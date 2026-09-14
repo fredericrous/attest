@@ -30,7 +30,12 @@
 # which.
 #
 # Depends on `git` and `ssh-keygen` only. See SPEC.md for the format.
-set -u
+#
+# `-f`: no filesystem globbing, ever. Gate names come out of a signed note and
+# are word-split on purpose; a name like `pre-push-*` next to a file named
+# `pre-push-cargo-test` would otherwise become that file's name and cover a
+# gate nobody signed.
+set -uf
 
 FORMAT=amont-attest-v2
 NOTES_REF=amont-attest

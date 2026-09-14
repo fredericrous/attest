@@ -512,6 +512,16 @@ attach_note "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key
 attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
 check "fp: covered by tree and by fingerprint, listed once" "test" "$R"
 
+# --- gate names are literal, never globs ------------------------------------
+# A signed gate called `pre-push-*` next to a FILE called pre-push-cargo-test
+# must come out as `pre-push-*`, not as the file's name: word-splitting the
+# gate list with globbing on would cover a gate nobody signed.
+make_repo "$R" signer@example.org "$WORK/key"
+echo x > "$R/pre-push-cargo-test"; git -C "$R" add -A; git -C "$R" commit -q -m decoy
+attach_note "$R" "$(payload_for "$R" 'pre-push-*' "$PLATFORM")" "$WORK/key"
+check "a wildcard gate name is not expanded against the working tree" 'pre-push-*' "$R"
+check "...nor when admitted by --anywhere" 'pre-push-*' "$R" --platform s390x-aix --anywhere 'pre-push-*'
+
 # --- the JSON shape the actions publish ------------------------------------
 if [ "${SKIP_JSON:-}" != 1 ]; then
     make_repo "$R" signer@example.org "$WORK/key"
