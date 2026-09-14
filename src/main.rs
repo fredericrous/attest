@@ -8,8 +8,6 @@
 mod attest;
 mod git;
 
-use std::path::PathBuf;
-
 const USAGE: &str = "\
 git-attest — what a signed attestation covers for the tree checked out here
 
@@ -25,8 +23,10 @@ git-attest — what a signed attestation covers for the tree checked out here
             stderr. Use it when a skip you expected did not happen.
 
   --signers PATH    default: .forgejo/allowed_signers, then
-                    .github/allowed_signers, resolved from the REPOSITORY ROOT
-  --principal ID    default: the first principal named in the signers file
+                    .github/allowed_signers. A relative PATH is resolved from
+                    the REPOSITORY ROOT, not the working directory
+  --principal ID    accept only a signature by this identity. Default: whoever
+                    the signature says, if that key is in the signers file
   --platform P      default: this machine. `any` accepts an attestation from
                     anywhere, which is a claim that the suite's result does not
                     depend on where it ran.
@@ -35,16 +35,44 @@ git-attest — what a signed attestation covers for the tree checked out here
                     $GITHUB_OUTPUT
 ";
 
-fn flag(args: &[String], name: &str) -> Result<Option<String>, String> {
-    match args.iter().position(|a| a == name) {
-        None => Ok(None),
-        Some(i) => args
-            .get(i + 1)
-            .filter(|v| !v.starts_with("--"))
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| format!("{name} needs a value")),
+#[derive(Default, Debug, PartialEq)]
+struct Opts {
+    signers: Option<String>,
+    principal: Option<String>,
+    platform: Option<String>,
+    json: bool,
+    gha: bool,
+}
+
+/// The flags after the verb. An unknown one is an ERROR, not something to
+/// skip: `--platfrom any` that silently fell back to this machine's platform
+/// would never cover anything and never say why, which is the exact shape of
+/// silence this tool exists to remove. `verify.sh` refuses the same way.
+fn parse(args: &[String]) -> Result<Opts, String> {
+    let mut o = Opts::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => o.json = true,
+            "--github-output" => o.gha = true,
+            name @ ("--signers" | "--principal" | "--platform") => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|v| !v.starts_with("--"))
+                    .cloned()
+                    .ok_or_else(|| format!("{name} needs a value"))?;
+                match name {
+                    "--signers" => o.signers = Some(value),
+                    "--principal" => o.principal = Some(value),
+                    _ => o.platform = Some(value),
+                }
+                i += 1;
+            }
+            other => return Err(format!("unknown argument {other}")),
+        }
+        i += 1;
     }
+    Ok(o)
 }
 
 /// Gate names as a JSON array.
@@ -102,17 +130,17 @@ fn run(args: &[String]) -> u8 {
         }
     }
     let explain = verb == "explain";
-    let json = args.iter().any(|a| a == "--json");
-    let gha = args.iter().any(|a| a == "--github-output");
-
-    let (signers, principal, platform) = match (
-        flag(args, "--signers"),
-        flag(args, "--principal"),
-        flag(args, "--platform"),
-    ) {
-        (Ok(s), Ok(p), Ok(pl)) => (s, p, pl),
-        (Err(m), _, _) | (_, Err(m), _) | (_, _, Err(m)) => {
+    let Opts {
+        signers,
+        principal,
+        platform,
+        json,
+        gha,
+    } = match parse(&args[1..]) {
+        Ok(o) => o,
+        Err(m) => {
             eprintln!("git-attest: {m}");
+            eprint!("{USAGE}");
             return 2;
         }
     };
@@ -141,16 +169,14 @@ fn run(args: &[String]) -> u8 {
         0
     };
 
-    let Some(signers) = signers.map(PathBuf::from).or_else(attest::default_signers) else {
+    let Some(signers) = signers
+        .as_deref()
+        .map(attest::resolve_signers)
+        .or_else(attest::default_signers)
+    else {
         return done(
             None,
             vec!["no allowed_signers found (.forgejo/ or .github/) at the repository root".into()],
-        );
-    };
-    let Some(principal) = principal.or_else(|| attest::first_principal(&signers)) else {
-        return done(
-            None,
-            vec![format!("{} names no principal", signers.display())],
         );
     };
 
@@ -164,7 +190,7 @@ fn run(args: &[String]) -> u8 {
         None => Some(attest::platform()),
     };
 
-    let verdict = attest::evaluate(&signers, &principal, want.as_deref());
+    let verdict = attest::evaluate(&signers, principal.as_deref(), want.as_deref());
     done(verdict.gates, verdict.trail)
 }
 
@@ -199,19 +225,32 @@ mod tests {
         );
     }
 
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn flags_need_values_and_reject_a_following_flag() {
-        let a: Vec<String> = ["covered", "--signers", "p", "--json"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(flag(&a, "--signers").unwrap().as_deref(), Some("p"));
-        assert_eq!(flag(&a, "--principal").unwrap(), None);
-        let b: Vec<String> = ["covered", "--signers", "--json"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert!(flag(&b, "--signers").is_err());
+        let o = parse(&argv(&["--signers", "p", "--json"])).unwrap();
+        assert_eq!(o.signers.as_deref(), Some("p"));
+        assert_eq!(o.principal, None);
+        assert!(o.json && !o.gha);
+        assert!(parse(&argv(&["--signers", "--json"])).is_err());
+    }
+
+    /// A typo must be refused, not skipped: `--platfrom any` that fell back to
+    /// this machine's platform would silently never cover anything.
+    #[test]
+    fn an_unknown_flag_is_a_usage_error() {
+        assert_eq!(
+            parse(&argv(&["--platfrom", "any"])),
+            Err("unknown argument --platfrom".into())
+        );
+        assert_eq!(
+            parse(&argv(&["--quiet"])),
+            Err("unknown argument --quiet".into())
+        );
+        assert_eq!(parse(&[]), Ok(Opts::default()));
     }
 
     #[test]

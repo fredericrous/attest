@@ -55,10 +55,43 @@ you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
 ```
 
 > Use **your real address**, the one in the note's principal column. The
-> action defaults to the first principal this file names, so there is nothing
-> to keep in sync.
+> verifier reads the signer's identity from the signature itself, so a file
+> naming a whole team just works and there is nothing to keep in sync.
 
-**3. Add the step**, as shown at the top.
+This file decides who may skip CI, and it is read from the tree being
+verified: a pull request that adds a key to it can attest itself. That is the
+same trust as editing a workflow file, so give it the same protection — if
+`.github/workflows/` is under CODEOWNERS or required review, put
+`allowed_signers` there too.
+
+**3. Add the step**, as shown at the top. The action is pinned by a moving
+`v1` tag above; for a step that decides whether tests run, prefer pinning the
+commit — each release's notes name it:
+
+```yaml
+- uses: fredericrous/attest@<sha>  # v1.x.y
+```
+
+## What gets skipped, and when
+
+The gate name is the whole contract between your hook and your CI step. A hook
+gate called `pre-push-cargo-test` that runs `cargo test --lib` does not cover
+a CI step running `cargo test --workspace`, whatever the name says — make them
+the same command.
+
+The signature covers the **tree**, so an attestation survives a reword, an
+amend, a rebase and a squash-merge. On a `pull_request` trigger, though, CI
+checks out a merge commit the forge just made, and its tree equals your pushed
+tip's tree only when the branch is up to date with its base. Otherwise the job
+log reads `attested tree … is not the checked-out tree …` and the tests run —
+correctly, because that merged result was never tested. Rebase to get the skip
+back, or verify on `push`.
+
+The attestation is only as honest as the machine that made it. The signing key
+is a file on that machine, and anything running there as you can sign with it;
+so can anything that runs your test suite as you. Nothing here protects
+against that, any more than a green CI run protects against a developer with
+push access.
 
 ## Producing attestations
 

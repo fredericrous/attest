@@ -74,24 +74,92 @@ fn push_reason(trail: &mut Vec<String>, reason: String) {
     }
 }
 
-/// `ssh-keygen -Y verify` over the exact signed bytes.
-pub fn verify(payload: &str, sig: &str, allowed_signers: &Path, principal: &str) -> bool {
-    use std::io::Write;
-    // -Y verify takes the signature as a FILE; the payload rides stdin.
-    let sig_file = std::env::temp_dir().join(format!(
-        "attest-verify-{}-{:p}.sig",
-        std::process::id(),
-        &sig
-    ));
-    if std::fs::write(&sig_file, format!("{sig}\n")).is_err() {
-        return false;
+/// The armored signature as a file, because `ssh-keygen -Y` takes it no other
+/// way. Removed on drop, so no early return below can leak it.
+struct SigFile(PathBuf);
+
+impl SigFile {
+    fn new(sig: &str) -> Option<Self> {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "attest-verify-{}-{:p}.sig",
+            std::process::id(),
+            &sig
+        ));
+        // `create_new` refuses an existing path, symlink included, rather than
+        // following it — the temp dir is shared with every other process.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .ok()?;
+        f.write_all(sig.as_bytes()).ok()?;
+        f.write_all(b"\n").ok()?;
+        Some(SigFile(path))
     }
+}
+
+impl Drop for SigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// WHO signed, read from the signature and the file rather than guessed.
+///
+/// `ssh-keygen -Y verify` requires a principal and checks it against the
+/// principal column, so a guessed one rejects a perfectly good signature —
+/// quietly, since every rejection means "run the tests". The templates this
+/// replaced hardcoded `-I you@example.com`; the first release guessed the
+/// file's first entry, which silently uncovered every other signer on a team.
+/// `find-principals` answers from the key that actually signed.
+fn find_principal(sig_file: &Path, allowed_signers: &Path) -> Option<String> {
+    let out = Command::new("ssh-keygen")
+        .args(["-Y", "find-principals", "-s"])
+        .arg(sig_file)
+        .arg("-f")
+        .arg(allowed_signers)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// `ssh-keygen -Y verify` over the exact signed bytes, as `principal` — or, when
+/// none is given, as whoever the signature says. `Ok` carries the identity the
+/// signature verified as; `Err` carries the reason it did not.
+pub fn verify(
+    payload: &str,
+    sig: &str,
+    allowed_signers: &Path,
+    principal: Option<&str>,
+) -> Result<String, String> {
+    use std::io::Write;
+    let Some(sig_file) = SigFile::new(sig) else {
+        return Err("cannot create a temporary file for the signature".into());
+    };
+    let signer = match principal {
+        Some(p) => p.to_string(),
+        None => find_principal(&sig_file.0, allowed_signers).ok_or_else(|| {
+            format!(
+                "signature was not made by any key in {}",
+                allowed_signers.display()
+            )
+        })?,
+    };
     let ok = (|| {
         let mut child = Command::new("ssh-keygen")
-            .args(["-Y", "verify", "-n", NAMESPACE, "-I", principal, "-f"])
+            .args(["-Y", "verify", "-n", NAMESPACE, "-I", &signer, "-f"])
             .arg(allowed_signers)
             .arg("-s")
-            .arg(&sig_file)
+            .arg(&sig_file.0)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -101,8 +169,45 @@ pub fn verify(payload: &str, sig: &str, allowed_signers: &Path, principal: &str)
         child.wait().ok().map(|s| s.success())
     })()
     .unwrap_or(false);
-    let _ = std::fs::remove_file(&sig_file);
-    ok
+    if ok {
+        Ok(signer)
+    } else {
+        Err(format!(
+            "signature does not verify as {signer} against {}",
+            allowed_signers.display()
+        ))
+    }
+}
+
+/// Fetch the notes ref from origin, and say so when that fails for a reason
+/// other than "origin has no such ref".
+///
+/// A repository never pushed with attest enabled has no such ref, and that is
+/// not an error. A fetch that fails for any OTHER reason — no credentials
+/// because the checkout step set `persist-credentials: false`, a remote not
+/// named origin, no network — is the worst shape a fail-open can take: nothing
+/// covered, forever, with CI green and a log that reads as "no attestation".
+fn fetch_notes(trail: &mut Vec<String>) {
+    let refspec = format!("+refs/notes/{NOTES_REF}:refs/notes/{NOTES_REF}");
+    if git::succeeds(&["fetch", "origin", &refspec]) {
+        return;
+    }
+    // ls-remote exits 2 when the ref simply is not there; anything else is the
+    // remote being unreachable or refusing us.
+    let remote_ref = format!("refs/notes/{NOTES_REF}");
+    if git::exit_code(&["ls-remote", "--exit-code", "origin", &remote_ref]) == Some(2) {
+        return;
+    }
+    if git::succeeds(&["rev-parse", "--verify", "--quiet", &remote_ref]) {
+        return;
+    }
+    push_reason(
+        trail,
+        format!(
+            "cannot fetch refs/notes/{NOTES_REF} from origin and no local copy exists \
+             (no credentials on the checkout? remote not named origin?)"
+        ),
+    );
 }
 
 /// Where a repository keeps its `allowed_signers` when the caller does not say.
@@ -124,24 +229,18 @@ pub fn default_signers() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// The first principal an `allowed_signers` file names.
-///
-/// `ssh-keygen -Y verify` REQUIRES an identity and checks it against the
-/// principal column, so a wrong value rejects a perfectly good signature. One
-/// key, one principal is the overwhelmingly common shape of this file; a
-/// multi-signer team passes `--principal`.
-///
-/// Defaulting here is what makes the feature safe to copy. The CI templates
-/// this replaces hardcoded `-I you@example.com`, so every user who wrote their
-/// real address into `allowed_signers` got a gate that never fired and never
-/// said so.
-pub fn first_principal(signers: &Path) -> Option<String> {
-    let body = std::fs::read_to_string(signers).ok()?;
-    body.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with('#'))
-        .and_then(|l| l.split_whitespace().next())
-        .map(str::to_string)
+/// A caller-supplied signers path, resolved the way the default is: relative
+/// to the REPOSITORY ROOT, not the working directory. Absolute paths pass
+/// through.
+pub fn resolve_signers(given: &str) -> PathBuf {
+    let path = PathBuf::from(given);
+    if path.is_absolute() {
+        return path;
+    }
+    match git::stdout(&["rev-parse", "--show-toplevel"]) {
+        Some(root) => PathBuf::from(root).join(path),
+        None => path,
+    }
 }
 
 /// A note body back into the exact bytes that were signed, plus the signature.
@@ -170,18 +269,29 @@ fn field<'a>(payload: &'a str, name: &str) -> Option<&'a str> {
 
 /// The whole decision, trail included.
 ///
-/// `require_platform` of `None` means the caller has stated this suite's
-/// result does not depend on where it ran.
-pub fn evaluate(signers: &Path, principal: &str, require_platform: Option<&str>) -> Verdict {
+/// `principal` of `None` means "whoever the signature says, if that key is in
+/// the file"; `Some` narrows it to one identity. `require_platform` of `None`
+/// means the caller has stated this suite's result does not depend on where
+/// it ran.
+pub fn evaluate(
+    signers: &Path,
+    principal: Option<&str>,
+    require_platform: Option<&str>,
+) -> Verdict {
     let mut trail = Vec::new();
 
-    // Best-effort: a repository never pushed with attest enabled has no such
-    // ref, and that is not an error.
-    let refspec = format!("+refs/notes/{NOTES_REF}:refs/notes/{NOTES_REF}");
-    let _ = git::succeeds(&["fetch", "origin", &refspec]);
+    if !signers.is_file() {
+        return Verdict::nothing(format!("{} does not exist", signers.display()));
+    }
+
+    fetch_notes(&mut trail);
 
     let Some(head_tree) = git::stdout(&["rev-parse", "HEAD^{tree}"]) else {
-        return Verdict::nothing("cannot resolve HEAD^{tree} — not a git repository?");
+        push_reason(
+            &mut trail,
+            "cannot resolve HEAD^{tree} — not a git repository?".into(),
+        );
+        return Verdict { gates: None, trail };
     };
 
     // The TREE first: it is what the signature covers, so it is the only key
@@ -189,13 +299,15 @@ pub fn evaluate(signers: &Path, principal: &str, require_platform: Option<&str>)
     // follow for notes written by a producer that keyed by commit only —
     // HEAD^2 because a PR checkout is a merge commit git made a moment ago,
     // whose second parent is the pushed tip that carries the note.
+    let mut tried = false;
     for candidate in [head_tree.as_str(), "HEAD", "HEAD^2"] {
-        let Some(object) = git::stdout(&["rev-parse", "--verify", candidate]) else {
+        let Some(object) = git::stdout(&["rev-parse", "--verify", "--quiet", candidate]) else {
             continue;
         };
         let Some(body) = git::stdout(&["notes", "--ref", NOTES_REF, "show", &object]) else {
             continue;
         };
+        tried = true;
         let Some((payload, sig)) = split_note(&body) else {
             push_reason(
                 &mut trail,
@@ -246,23 +358,19 @@ pub fn evaluate(signers: &Path, principal: &str, require_platform: Option<&str>)
                 continue;
             }
         }
-        if verify(&payload, &sig, signers, principal) {
-            push_reason(&mut trail, format!("signature verifies as {principal}"));
-            return Verdict {
-                gates: Some(gates.split_whitespace().map(str::to_string).collect()),
-                trail,
-            };
+        match verify(&payload, &sig, signers, principal) {
+            Ok(signer) => {
+                push_reason(&mut trail, format!("covered by {signer}: {gates}"));
+                return Verdict {
+                    gates: Some(gates.split_whitespace().map(str::to_string).collect()),
+                    trail,
+                };
+            }
+            Err(why) => push_reason(&mut trail, format!("note on {candidate}: {why}")),
         }
-        push_reason(
-            &mut trail,
-            format!(
-                "signature on {candidate} does not verify as {principal} against {}",
-                signers.display()
-            ),
-        );
     }
 
-    if trail.is_empty() {
+    if !tried {
         push_reason(
             &mut trail,
             format!("no attestation found for tree {head_tree}"),

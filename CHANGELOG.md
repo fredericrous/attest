@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+An audit of 1.0.0, applied. Nothing here changes the wire format.
+
+**Fixed:**
+
+- **Every later run on a Mac could fail open forever.** `verify.sh` asked
+  `mktemp` for `attest-XXXXXX.sig`, and stock macOS `mktemp` does not
+  substitute a template whose Xs are not at the very end: it created that
+  literal file, and the next run — after a killed one had left it behind —
+  failed with "File exists" and covered nothing. The template has no suffix
+  now.
+- **A failed fetch of the notes ref was silent.** A checkout with
+  `persist-credentials: false`, a remote not named `origin`, or no network
+  read as "no attestation found", indefinitely. Both implementations now say
+  when the ref could not be fetched and no local copy exists — and stay quiet
+  when origin simply has no such ref.
+- **The principal was guessed.** 1.0.0 verified as the first entry of
+  `allowed_signers`, so on a team every other signer's notes silently covered
+  nothing. The identity is now read from the signature
+  (`ssh-keygen -Y find-principals`); `--principal` and the action's
+  `principal` input restrict to one identity instead of naming the only one.
+- **Control characters in a gate name reached the JSON output raw** from
+  `verify.sh`, where they would make the consumer's `fromJSON` throw and fail
+  the job. They leave as `\u00xx`, as the comment always claimed and as
+  `git-attest` already did.
+- **The two implementations disagreed on a note with no `platform` line**
+  under `--platform any`: the shell covered it, the binary did not. Both
+  reject it now, and the spec says the field is required.
+- **`git-attest` ignored flags it did not know**, so `--platfrom any` fell
+  back to this machine's platform and never covered anything. Unknown flags
+  are a usage error (exit 2) in both implementations.
+- **`git-attest --signers` resolved a relative path from the working
+  directory**, unlike `verify.sh`; both resolve from the repository root now,
+  and a path to a missing file says so.
+- `verify.sh --help` printed three lines of code after the usage text.
+
+**Documented:** why a `pull_request` checkout rarely matches the attested
+tree; that `allowed_signers` deserves the same review protection as a workflow
+file; what a producer owes the tree it signs (a clean working tree, an honest
+gate name); pin the action by commit.
+
+**CI:** actions pinned by commit SHA, release permissions scoped to the jobs
+that write, a Windows leg in the conformance matrix, and fixtures for every
+case above.
+
 ## 1.0.0
 
 First release.
