@@ -194,6 +194,7 @@ conviction: trust what was verified, never what was reported.
 | [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format, input fingerprints included |
 | [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo |
 | [`sign/`](sign/) | the CI producer: `sign/action.yml` wraps `sign/sign.sh` |
+| [`.github/attest-inputs`](.github/attest-inputs) | this repository's own input spec: the dogfood, and a template |
 | [`verify.sh`](verify.sh) | the verifier the action runs. `git` and `ssh-keygen`, nothing else |
 | `src/` | `git-attest`, the same contract as a binary |
 | [`tests/conformance.sh`](tests/conformance.sh) | the fixtures both implementations must pass |
