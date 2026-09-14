@@ -208,7 +208,7 @@ raw_input_note() { # dir content gate fp
 # there the fixture is SKIPPED, visibly, rather than passed vacuously.
 check_faulty() { # name mode expected-stdout dir [flags...]
     local name=$1 mode=$2 want=$3 dir=$4; shift 4
-    local oldpath=$PATH
+    local oldpath=$PATH probe
     case "$IMPL" in
         bash*) ;;
         *) if [ "$OS" = windows ]; then
@@ -216,9 +216,21 @@ check_faulty() { # name mode expected-stdout dir [flags...]
                return 0
            fi ;;
     esac
-    ATTEST_FAULT=$mode; ATTEST_REAL_GIT=$(command -v git)
-    export ATTEST_FAULT ATTEST_REAL_GIT
-    PATH="$LIB_DIR/fault:$PATH"
+    # A fresh copy with LF endings and the executable bit: a checkout may have
+    # given the wrapper neither (autocrlf, core.filemode), and a wrapper that
+    # is not reached makes the case pass for the wrong reason.
+    mkdir -p "$WORK/fault"
+    tr -d '\r' < "$LIB_DIR/fault/git" > "$WORK/fault/git"
+    chmod +x "$WORK/fault/git"
+    ATTEST_REAL_GIT=$(command -v git); export ATTEST_REAL_GIT
+    PATH="$WORK/fault:$PATH"
+    probe=$(ATTEST_FAULT=probe git --version 2> /dev/null)
+    if [ "$probe" != attest-faulty-git ]; then
+        PATH=$oldpath
+        printf '  SKIP  %s (the faulty-git wrapper is not reached on this platform: got %s)\n' "$name" "[$probe]"
+        return 0
+    fi
+    ATTEST_FAULT=$mode; export ATTEST_FAULT
     run_impl "$dir" "$@"
     PATH=$oldpath; unset ATTEST_FAULT ATTEST_REAL_GIT
     if [ "$GOT" = "$want" ] && [ "$RC" -eq 0 ]; then ok "$name"

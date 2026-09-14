@@ -10,6 +10,7 @@
 # Both implementations spawn `git` from PATH, so one wrapper serves both.
 real=${ATTEST_REAL_GIT:?}
 case "${ATTEST_FAULT:-}:$*" in
+    probe:*) echo attest-faulty-git; exit 0 ;;
     ls-tree:*" ls-tree "*|ls-tree:"ls-tree "*)
         # -z output: records end in NUL. One record, then a failure after it.
         "$real" "$@" | head -c 64
