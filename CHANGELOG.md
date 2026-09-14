@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
 An audit of 1.0.0, applied. Nothing here changes the wire format.
 
