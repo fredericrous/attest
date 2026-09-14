@@ -19,7 +19,9 @@ inputs:
   key:
     description: >-
       The private half of an ed25519 key whose public half is committed in
-      allowed_signers — from a secret, `${{ secrets.ATTEST_SIGNING_KEY }}`.
+      allowed_signers, passed from a repository secret (see the README for the
+      expression; it cannot be spelled here, because GitHub EVALUATES a
+      dollar-brace expression inside this description and refuses `secrets`).
       Empty on a fork pull request, which is fine: nothing is signed and the
       step succeeds.
     required: true

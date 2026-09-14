@@ -26,6 +26,10 @@ ORIGIN=$WORK/origin.git
 # `second`, pushed to a fresh bare origin.
 make_remote_repo() {
     rm -rf "$ORIGIN"; git init -q --bare "$ORIGIN"
+    # Runners default to `master`; the branch pushed below is `main`, and a
+    # clone of a bare repository whose HEAD names a missing branch checks out
+    # nothing.
+    git --git-dir="$ORIGIN" symbolic-ref HEAD refs/heads/main
     make_repo "$R" ci@example.org "$WORK/key" second@example.org "$WORK/second"
     git -C "$R" remote add origin "$ORIGIN"
     git -C "$R" push -q origin HEAD:refs/heads/main

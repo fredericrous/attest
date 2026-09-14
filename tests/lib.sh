@@ -29,6 +29,7 @@ make_repo() { # dir principal keyfile [principal2 keyfile2]
     rm -rf "$dir"; mkdir -p "$dir/.github"
     git init -q "$dir"
     git -C "$dir" config core.hooksPath /dev/null
+    git -C "$dir" config core.autocrlf false
     git -C "$dir" config user.email signer@example.org
     git -C "$dir" config user.name Signer
     printf '%s namespaces="amont-attest" %s\n' "$principal" "$(cat "$keyfile.pub")" \
@@ -83,7 +84,7 @@ append_note() { # dir payload keyfile [target]
 raw_note() { # dir content [target]
     local dir=$1 content=$2 target=${3:-} blob
     [ -n "$target" ] || target=$(git -C "$dir" rev-parse 'HEAD^{tree}')
-    blob=$(printf '%s' "$content" | git -C "$dir" hash-object -w --stdin)
+    blob=$(printf '%s' "$content" | git -C "$dir" hash-object -w --stdin --no-filters)
     git -C "$dir" notes --ref amont-attest add -f -C "$blob" "$target" 2> /dev/null
 }
 
