@@ -61,7 +61,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Windows spawns processes slowly and the suites run three verifiers over
+    # 120 fixtures plus the producer's 71; it needs about 25 minutes there.
+    timeout-minutes: 40
     permissions:
       contents: write
     steps:
