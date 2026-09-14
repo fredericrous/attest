@@ -46,6 +46,11 @@ single most common way to get an implementation wrong.
 | `platform <arch>-<os>` | where they ran, e.g. `x86_64-linux`, `aarch64-macos`, `x86_64-windows` |
 | `amont <version>` | the producer version, informational |
 
+`tree`, `gates` and `platform` are **required**. A v2 payload missing any of
+them is not a valid note and covers nothing — `platform` included, even for a
+verifier told to accept any platform: a note that does not say where it ran is
+not evidence about anywhere.
+
 Fields are read **by prefix, never by position**. The payload has already grown
 a line once (v1 → v2 added `platform`), and a positional reader mis-assigns
 every field after an insertion rather than failing. Where a field appears more
@@ -65,6 +70,13 @@ tree, for notes written by producers that keyed by commit only. `HEAD^2` is
 there because a pull-request checkout is a merge commit the forge made a moment
 ago, whose second parent is the pushed tip.
 
+A note found that way is still judged by its `tree` line, and on a
+pull-request checkout the tree of that merge commit equals the pushed tip's
+tree only when the branch is up to date with its base. Otherwise the
+attestation does not apply — correctly, since the merged result was never
+tested — and the verifier says so. A `push` trigger sees the pushed tip
+itself and has no such gap.
+
 ## Verifying
 
 A verifier reports gates as covered when **all** of these hold. Anything else,
@@ -83,8 +95,26 @@ including any error, reports nothing covered:
 you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
 ```
 
-The namespace pin is what stops a signature minted for something else being
-replayed here.
+`-Y verify` demands a principal, and the right one is read from the signature
+rather than guessed: `ssh-keygen -Y find-principals -s <sig> -f
+<allowed_signers>` names the principal whose key made the signature, if that
+key is in the file, and that is the identity to verify as. A verifier may let
+its caller narrow this to one identity; it must not default to a guess such as
+the file's first entry, which silently uncovers every other signer.
+
+Two things pin the namespace. The `-n amont-attest` on `verify` rejects a
+signature whose embedded namespace is anything else, which is what stops a
+signature minted for another purpose — a signed commit, say — being replayed
+here. The `namespaces="amont-attest"` option in the file works the other way:
+it stops this key being trusted for anything else, should the same file ever
+be reused as `gpg.ssh.allowedSignersFile`.
+
+That file is read from the tree being verified, so **a change to it is a
+change to who may skip CI**. Anyone who can push a branch and the notes ref
+can add a key there and attest the same tree with it. That is the trust level
+of editing a workflow file, no more — but repositories that guard
+`.github/workflows/` with CODEOWNERS or required review should guard
+`allowed_signers` the same way.
 
 ### Fail-open is the contract
 
@@ -115,6 +145,16 @@ says why. Implementations must therefore report their reasoning on stderr
 ## Producing
 
 Out of scope here — amont's pre-push hook is the reference producer. What a
-producer owes this format: sign only checks that actually **passed** (not
-warned, not skipped, not unavailable), name the platform honestly, and key the
-note to the tree.
+producer owes this format:
+
+- Sign only checks that actually **passed** — not warned, not skipped, not
+  unavailable.
+- Run them against **the tree being signed**. A pre-push hook runs in a
+  working directory that may carry uncommitted or untracked changes, and a
+  suite that passed on that is no evidence about `HEAD^{tree}`. Check out a
+  clean export of the tree, or refuse to sign while the working tree is dirty.
+- Name the platform honestly, and key the note to the tree.
+- Keep the **gate name** an honest contract. It is the only thing tying the
+  hook's command to the CI step that trusts it: a gate called
+  `pre-push-cargo-test` that ran `cargo test --lib` covers a CI step running
+  `cargo test --workspace` in name only. Same name, same command.

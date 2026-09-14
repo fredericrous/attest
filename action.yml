@@ -22,9 +22,9 @@ inputs:
     default: ""
   principal:
     description: >-
-      Identity to verify against. Default: the first principal named in the
-      signers file — which is almost always what you want, and is the setting
-      that used to be hardcoded to a placeholder and silently broke everything.
+      Accept only an attestation signed by this identity. Default: whoever the
+      signature says, provided that key is in the signers file — so a file
+      naming a whole team just works, and there is nothing to keep in sync.
     required: false
     default: ""
   platform:

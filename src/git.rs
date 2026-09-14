@@ -25,11 +25,17 @@ pub fn stdout(args: &[&str]) -> Option<String> {
 
 /// Did `git <args>` exit 0? Output discarded.
 pub fn succeeds(args: &[&str]) -> bool {
+    exit_code(args) == Some(0)
+}
+
+/// The exit code of `git <args>`, output discarded. `None` when git could not
+/// be run at all or was killed by a signal.
+pub fn exit_code(args: &[&str]) -> Option<i32> {
     Command::new("git")
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .ok()?
+        .code()
 }
