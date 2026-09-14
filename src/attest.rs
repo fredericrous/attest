@@ -262,9 +262,8 @@ pub struct Block {
 /// The grammar (SPEC.md): skip blank lines; a payload runs to the first blank
 /// line; skip blank lines; the next line must be the BEGIN marker, or parsing
 /// STOPS and what was collected so far stands; the signature runs to the END
-/// marker, and end of input closes an open one. Lines are split on LF only, so
-/// a `\r` is content: a CRLF note has no blank line, yields no block, and
-/// covers nothing — the same answer `verify.sh` gives it.
+/// marker, and end of input closes an open one. Lines are split on LF only;
+/// `evaluate` rejects any note containing a carriage return before this runs.
 ///
 /// Returns the blocks and whether more than `MAX_BLOCKS` were present.
 pub fn split_blocks(body: &str) -> (Vec<Block>, bool) {
@@ -448,6 +447,16 @@ pub fn evaluate(
             continue;
         };
         tried = true;
+
+        // LF only, the whole note: `verify.sh` applies the same test before
+        // any tool sees the bytes, because some awks drop carriage returns.
+        if body.contains('\r') {
+            push_reason(
+                &mut trail,
+                format!("note on {candidate} contains carriage returns; the format is LF-only"),
+            );
+            continue;
+        }
 
         let (blocks, truncated) = split_blocks(&body);
         if truncated {

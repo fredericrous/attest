@@ -26,8 +26,8 @@ Two additions, no wire-format change (the format token stays
   At most 32 blocks are read. 1.1.0 verifiers read block 1 only and can never
   report a later block's gates — `make compat` proves it against the frozen
   1.1.0 shell and Rust implementations.
-- Both implementations now split lines on LF only, so a CRLF note is rejected
-  the same way by each.
+- A note containing a carriage return anywhere is rejected whole, by both
+  implementations, before parsing.
 
 **Follow-up for amont:** its pre-push hook writes with `git notes add -f`,
 which erases CI's block on the next push of the same tree. Switch to `append`.

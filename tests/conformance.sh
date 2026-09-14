@@ -16,10 +16,13 @@
 # fixture every implementation passes is testing nothing.
 set -u
 
+# shellcheck disable=SC2034  # read by lib.sh
 IMPL=${1:?usage: conformance.sh <implementation command>}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-# shellcheck source=tests/lib.sh
+# The helper is sourced, which shellcheck follows only under -x; the hook
+# runs without it, so the two findings that follow from that are silenced.
+# shellcheck source=lib.sh disable=SC1091
 . "$(dirname "$0")/lib.sh"
 gen_keys
 
@@ -106,10 +109,9 @@ git -C "$R" notes --ref amont-attest add -f \
     -m "$(printf '%s' "$body" | sed 's/gates pre-push-cargo-test/gates pre-push-cargo-test pre-push-audit-rust/')" "$tree" 2> /dev/null
 check "payload edited after signing" "" "$R"
 
-# Line separator is LF only; a `\r` is content. An LF-signed note that some
-# tool converted to CRLF has no blank line and therefore no block; a payload
-# that was signed WITH carriage returns verifies, but its tree line no longer
-# names the tree. Both cover nothing, in both implementations.
+# A note containing a carriage return anywhere is rejected whole, whether
+# some tool converted an LF-signed note to CRLF or the payload was signed with
+# carriage returns in it. Both cover nothing, in both implementations.
 make_repo "$R" signer@example.org "$WORK/key"
 raw_note "$R" "$(sign_block "$R" "$(payload_for "$R" pre-push-cargo-test "$PLATFORM")" "$WORK/key" | sed 's/$/\r/')"
 check "LF-signed note converted to CRLF" "" "$R"

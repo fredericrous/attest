@@ -189,6 +189,7 @@ field() { printf '%s\n' "$2" | awk -v k="$1" '$1 == k { sub(/^[^ ]* */, ""); pri
 # How many blocks of one note are read. Every block costs two ssh-keygen runs,
 # and the notes ref is writable by anyone with push access.
 MAX_BLOCKS=32
+CR=$(printf '\r')
 
 # A note holds one or more BLOCKS — payload, blank line, armored signature —
 # since 1.2.0, so a laptop and a CI job can both attest the same tree, each on
@@ -200,8 +201,7 @@ MAX_BLOCKS=32
 # line; skip blank lines; the next line must be the BEGIN marker, or parsing
 # STOPS and what was collected stands; the signature runs to END, and end of
 # input closes an open one. Same state machine as split_blocks() in
-# src/attest.rs. A `\r` is content, so a CRLF note has no blank line and yields
-# no block — the same answer the binary gives it.
+# src/attest.rs.
 blocks_of() {
     printf '%s\n' "$1" | awk -v max="$MAX_BLOCKS" \
         -v b='-----BEGIN SSH SIGNATURE-----' -v e='-----END SSH SIGNATURE-----' '
@@ -261,6 +261,12 @@ for candidate in "$head_tree" HEAD HEAD^2; do
     seen="$seen $note_oid"
     body=$(git notes --ref "$NOTES_REF" show "$object" 2> /dev/null) || continue
     tried=yes
+
+    # LF only. Checked by the shell itself, before any tool sees the note:
+    # the awk and sed of some environments (MSYS, hence Git Bash on Windows)
+    # drop carriage returns on the way in, which would let a CRLF note parse
+    # here and be refused by the binary.
+    case $body in *"$CR"*) note "note on $candidate contains carriage returns; the format is LF-only"; continue ;; esac
 
     ranges=$(blocks_of "$body")
     [ -n "$ranges" ] || { note "note on $candidate carries no signature block"; continue; }

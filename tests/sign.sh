@@ -12,10 +12,13 @@ set -u
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SIGN="$HERE/sign/sign.sh"
 VERIFY="$HERE/verify.sh"
+# shellcheck disable=SC2034  # read by lib.sh
 IMPL="bash $VERIFY --quiet"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-# shellcheck source=tests/lib.sh
+# The helper is sourced, which shellcheck follows only under -x; the hook
+# runs without it, so the two findings that follow from that are silenced.
+# shellcheck source=lib.sh disable=SC1091
 . "$HERE/tests/lib.sh"
 gen_keys
 

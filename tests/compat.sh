@@ -14,10 +14,13 @@
 # notes that 1.1.0 consumers will still read.
 set -u
 
+# shellcheck disable=SC2034  # read by lib.sh
 IMPL=${1:?usage: compat.sh <frozen implementation command>}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-# shellcheck source=tests/lib.sh
+# The helper is sourced, which shellcheck follows only under -x; the hook
+# runs without it, so the two findings that follow from that are silenced.
+# shellcheck source=lib.sh disable=SC1091
 . "$(dirname "$0")/lib.sh"
 gen_keys
 

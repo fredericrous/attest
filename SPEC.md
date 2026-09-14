@@ -106,8 +106,11 @@ the same state machine:
    says so. Every block costs two `ssh-keygen` runs, and the notes ref is
    writable by anyone with push access.
 
-Lines are split on LF only; a carriage return is content. A CRLF note has no
-blank line, yields no block, and covers nothing.
+Lines are LF-separated, and a note containing a carriage return **anywhere**
+is rejected whole, before parsing. This is a check on the raw bytes, made by
+each implementation itself rather than by a tool it shells out to: the `awk`
+and `sed` of some environments drop carriage returns on input, and a CRLF note
+must cover nothing everywhere.
 
 Each block is judged **on its own** by every rule under "Verifying". The
 isolation guarantee, precisely: a correctly framed block whose payload or
