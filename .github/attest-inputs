@@ -1,8 +1,8 @@
-# <gate> <path>...  — literal paths and directories only. git ls-tree does not
-# glob: `tests/*.sh` would match NOTHING and silently fingerprint nothing.
-# This file is an input of every gate; editing it re-runs everything once.
-# The workflow is in every line on purpose: a gate name is only worth the
-# command behind it, and that command is defined there.
+# <gate> <path>...   Literal paths and directories only. git ls-tree does not
+# glob: tests/*.sh would match NOTHING and silently fingerprint nothing. This
+# file is ASCII-only and is itself an input of every gate; editing it re-runs
+# everything once. The workflow is in every line on purpose: a gate name is
+# only worth the command behind it, and that command is defined there.
 ci-fmt              .github/workflows/ci.yaml Cargo.toml rust-toolchain.toml src
 ci-clippy           .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src
 ci-shellcheck       .github/workflows/ci.yaml verify.sh sign/sign.sh tests

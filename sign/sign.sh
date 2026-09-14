@@ -94,7 +94,7 @@ umask 077
 tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/attest-sign-XXXXXX") || {
     say "cannot create a temporary directory"; finish error false false; }
 # The temporary refs the push loop works on go with the directory.
-# shellcheck disable=SC2329  # invoked by the trap
+# shellcheck disable=SC2329,SC2317  # invoked by the trap
 cleanup() {
     rm -rf "$tmp"
     git for-each-ref --format='%(refname)' "refs/notes/attest-sign-$$-*" 2> /dev/null | while read -r r; do
