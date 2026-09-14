@@ -8,6 +8,11 @@
 # ref; on a fork pull request there is no secret and a read-only token, and
 # both paths simply report and succeed.
 #
+# With a committed `.github/attest-inputs` the block also carries each signed
+# gate's input fingerprint and is filed under it in a second notes ref, so a
+# later tree that differs only outside a gate's declared inputs still skips
+# it. SPEC.md, "Input fingerprints".
+#
 # Forgejo uses the same file: `uses: https://github.com/fredericrous/attest/sign@v1`.
 name: attest-sign
 description: Sign an attestation for the gates that passed on this tree, and push it
@@ -88,6 +93,12 @@ outputs:
   gates:
     description: The normalised, space-separated list that was (or would have been) signed.
     value: ${{ steps.sign.outputs.gates }}
+  inputs:
+    description: >-
+      Input fingerprints, as published/wanted: how many of the signed gates
+      the committed attest-inputs spec declares, and how many of those were
+      published under their fingerprint key. `0/0` without a spec.
+    value: ${{ steps.sign.outputs.inputs }}
 
 runs:
   using: composite
@@ -122,5 +133,5 @@ runs:
         {
           printf '%s' "$ATTEST_KEY" \
             | bash "$GITHUB_ACTION_PATH/sign.sh" --github-output --gates "$ATTEST_GATES" "$@" \
-            || printf 'status=error\nsigned=false\npushed=false\ngates=\n'
+            || printf 'status=error\nsigned=false\npushed=false\ngates=\ninputs=0/0\n'
         } >> "$GITHUB_OUTPUT"
