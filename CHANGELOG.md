@@ -16,6 +16,12 @@
   spec invalid on any error) and it is a trust boundary like
   `allowed_signers`. Each run verifies at most 64 signatures. Never run
   `git notes prune` on the inputs ref.
+- **The sign action writes them.** With a committed spec, `sign/sign.sh` adds
+  an `input` line for each signed gate the spec declares and files the block
+  under its fingerprint key in the inputs ref, publishing that ref on its own
+  so a run whose inputs push failed repairs the keys next time. A fifth output
+  line, `inputs=<published>/<wanted>`. This repository's own spec covers its
+  five gates, so a docs-only change now skips all of them.
 
 ## 1.2.0
 

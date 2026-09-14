@@ -217,7 +217,52 @@ jobs:
           [ '${{ steps.osonly.outputs.gates }}' = '["ci-lint-only"]' ] || {
             echo 'os-only: ${{ steps.osonly.outputs.gates }}'; exit 1; }
 
-      # 5. The substring bug this project exists to fix. `pre-push-cargo-test`
+      # 5. Input fingerprints, with the real producer. Sign ci-fmt on this
+      #    tree with the local key, move the tree with a commit that touches
+      #    none of ci-fmt's declared inputs, and the verifier must still cover
+      #    it — by fingerprint, from the inputs ref. Then touch a declared
+      #    input and it must not.
+      - id: readkey2
+        run: |
+          set -eu
+          git notes --ref amont-attest remove "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true
+          {
+            echo 'key<<ATTEST_EOF'
+            cat "$RUNNER_TEMP/k"
+            echo 'ATTEST_EOF'
+          } >> "$GITHUB_OUTPUT"
+      - id: fpsign
+        uses: ./sign
+        with:
+          key: ${{ steps.readkey2.outputs.key }}
+          gates: ci-fmt
+          push: false
+      - name: the producer wrote a fingerprint and filed the block under it
+        run: |
+          set -eu
+          [ '${{ steps.fpsign.outputs.inputs }}' = 1/1 ] || { echo 'inputs: ${{ steps.fpsign.outputs.inputs }}'; exit 1; }
+          git notes --ref amont-attest show "$(git rev-parse 'HEAD^{tree}')" | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
+          echo unrelated > UNRELATED.md && git add UNRELATED.md && git commit -qm unrelated
+      - id: fpmoved
+        uses: ./
+        with:
+          signers: ${{ runner.temp }}/ci-signers
+      - name: an unrelated commit keeps the gate covered, by fingerprint
+        run: |
+          set -eu
+          [ '${{ steps.fpmoved.outputs.gates }}' = '["ci-fmt"]' ] || { echo 'got: ${{ steps.fpmoved.outputs.gates }}'; exit 1; }
+          echo '// touched' >> src/main.rs && git add src/main.rs && git commit -qm touch
+      - id: fpinput
+        uses: ./
+        with:
+          signers: ${{ runner.temp }}/ci-signers
+      - name: a commit to a declared input does not
+        run: |
+          set -eu
+          [ '${{ steps.fpinput.outputs.gates }}' = '[]' ] || { echo 'got: ${{ steps.fpinput.outputs.gates }}'; exit 1; }
+          git reset -q --hard HEAD~2
+
+      # 6. The substring bug this project exists to fix. `pre-push-cargo-test`
       #    is a substring of the covered `…-slow`, so the old string form would
       #    skip the real suite here. Array membership must not.
       - name: re-sign with only a prefix-colliding gate
