@@ -19,7 +19,8 @@ prefix that happens to be a word.
 
 ## The note
 
-One note per attested object, in `refs/notes/amont-attest`:
+One note per attested object, in `refs/notes/amont-attest`. A note holds one
+or more **blocks**, each a payload and its signature:
 
 ```
 amont-attest-v2
@@ -57,7 +58,71 @@ every field after an insertion rather than failing. Where a field appears more
 than once, the **first** occurrence wins and the rest are ignored.
 
 **Signature** — an armored `ssh-keygen -Y sign` block, namespace
-`amont-attest`, separated from the payload by exactly one blank line.
+`amont-attest`, separated from the payload by a blank line.
+
+### Several blocks in one note
+
+A laptop attests a tree on `aarch64-macos`; the CI job that tests the same
+tree attests it on `x86_64-linux`. One note per object, so both statements
+live in the same note, as blocks separated by one or more blank lines:
+
+```
+amont-attest-v2
+tree 4b825dc6…
+gates pre-push-cargo-test
+platform aarch64-macos
+amont 1.34.0
+
+-----BEGIN SSH SIGNATURE-----
+…
+-----END SSH SIGNATURE-----
+
+amont-attest-v2
+tree 4b825dc6…
+gates pre-push-cargo-test ci-fmt
+platform x86_64-linux
+amont attest-sign
+
+-----BEGIN SSH SIGNATURE-----
+…
+-----END SSH SIGNATURE-----
+```
+
+That is exactly the shape `git notes append -m <block>` produces, and its
+stripspace pass (trailing whitespace stripped, runs of blank lines collapsed)
+leaves it unchanged — the grammar is that command's fixed point, so a
+producer needs no flags. The parse, which both implementations perform with
+the same state machine:
+
+1. Skip blank lines. A payload starts at the first non-blank line and runs to
+   the next blank line; its trailing newline is part of the signed bytes.
+2. Skip blank lines. The next line must be exactly
+   `-----BEGIN SSH SIGNATURE-----`. If it is not, **parsing stops**; blocks
+   already collected still count.
+3. The signature runs to and including `-----END SSH SIGNATURE-----`. End of
+   input closes an open signature. A block that never ends swallows whatever
+   follows, and then fails to verify.
+4. At most **32 blocks** are read; any beyond are ignored, and the verifier
+   says so. Every block costs two `ssh-keygen` runs, and the notes ref is
+   writable by anyone with push access.
+
+Lines are split on LF only; a carriage return is content. A CRLF note has no
+blank line, yields no block, and covers nothing.
+
+Each block is judged **on its own** by every rule under "Verifying". The
+isolation guarantee, precisely: a correctly framed block whose payload or
+signature fails any check does not affect the other blocks; a framing error
+(a missing BEGIN, a missing END) ends parsing where it occurs. The verifier
+reports the **union** of the gates of the blocks that pass, in first-appearance
+order, without duplicates. A note reached through more than one candidate
+object (a producer that wrote it to the tree and the commit) is judged once.
+
+**Compatibility.** The 1.1.0 verifiers read one block: the payload before the
+first blank line and the signature from the first BEGIN marker to the end of
+the note, of which OpenSSH parses up to the first END marker. On a multi-block
+note they therefore report block 1's gates, or nothing. They can under-report,
+which is safe; they can never report a gate that only a later block names.
+`tests/compat.sh` proves this against the frozen 1.1.0 implementations.
 
 ## Which object carries the note
 
@@ -85,8 +150,7 @@ including any error, reports nothing covered:
 1. the payload's first line is exactly `amont-attest-v2`;
 2. `tree` equals the tree actually checked out (`git rev-parse 'HEAD^{tree}'`);
 3. `gates` is non-empty;
-4. `platform` equals the verifying platform, unless the caller has explicitly
-   accepted any;
+4. `platform` matches what the caller asked for (see below);
 5. `ssh-keygen -Y verify -n amont-attest` succeeds against an `allowed_signers`
    file **committed in the consuming repository**, for a principal that file
    names.
@@ -94,6 +158,32 @@ including any error, reports nothing covered:
 ```
 you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
 ```
+
+### Platform
+
+| the caller passes | an attestation is accepted from |
+|---|---|
+| nothing | this machine's `<arch>-<os>`, exactly |
+| `<arch>-<os>` (contains a dash) | that string, exactly |
+| `<os>` (no dash) | any `<arch>-<os>` whose part after the **last** dash is `<os>` — never a substring, so `inux` matches nothing and `x86_64` does not match `x86_64-linux` |
+| `any` | anywhere |
+
+A pass is a pass on something: a macOS `cargo test` is no evidence about the
+Windows leg of a matrix. `any` is the caller's statement that the whole suite's
+result cannot depend on where it ran.
+
+**Gates accepted from anywhere.** Some checks cannot depend on where they ran:
+formatting, shell lint, secret scanning, dependency audit. A verifier may take
+a list of gate names the caller accepts from any platform (`--anywhere`, the
+action's `anywhere` input); those names are admitted from a verified block on
+any platform, and other names in the same block are still held to the table
+above. The list is the caller's committed statement about those checks, made
+once. It is applied strictly **after** signature verification: an unverified
+block contributes nothing, listed or not. Never list a check that compiles or
+executes the product — tests, clippy, a typecheck under `cfg`, a build —
+whatever its name says.
+
+### Principal
 
 `-Y verify` demands a principal, and the right one is read from the signature
 rather than guessed: `ssh-keygen -Y find-principals -s <sig> -f
@@ -144,16 +234,30 @@ says why. Implementations must therefore report their reasoning on stderr
 
 ## Producing
 
-Out of scope here — amont's pre-push hook is the reference producer. What a
-producer owes this format:
+amont's pre-push hook is the reference producer for a laptop; `sign/sign.sh`
+in this repository (the `fredericrous/attest/sign` action) is the reference
+producer for CI. What a producer owes this format:
 
 - Sign only checks that actually **passed** — not warned, not skipped, not
-  unavailable.
+  unavailable. A CI producer signs only gates whose steps ran and passed in
+  that job: never under `if: always()`, and never a gate that was skipped
+  because it was already attested — that would launder another platform's
+  result into this one.
 - Run them against **the tree being signed**. A pre-push hook runs in a
   working directory that may carry uncommitted or untracked changes, and a
-  suite that passed on that is no evidence about `HEAD^{tree}`. Check out a
-  clean export of the tree, or refuse to sign while the working tree is dirty.
+  suite that passed on that is no evidence about `HEAD^{tree}`. Refuse to
+  sign while the working tree has modified or non-ignored untracked files, or
+  check out a clean export of the tree. The `tree` line is the tree of the
+  object the note is attached to — `HEAD^{tree}` by default — and a producer
+  must not sign any other. On a `pull_request` checkout that tree is the
+  forge's merge tree.
 - Name the platform honestly, and key the note to the tree.
+- **Append, never replace.** Write the block with `git notes append`; `git
+  notes add -f` erases every other producer's block on that tree. Keep the
+  `amont <version>` line stable across runs — no run id, no timestamp — so a
+  re-run recognises its own block as already present instead of appending it
+  again. Use an ed25519 key: its signatures are deterministic, which is what
+  makes that recognition exact.
 - Keep the **gate name** an honest contract. It is the only thing tying the
   hook's command to the CI step that trusts it: a gate called
   `pre-push-cargo-test` that ran `cargo test --lib` covers a CI step running

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
+# FROZEN COPY of verify.sh as released in 1.1.0 — DO NOT EDIT. `tests/compat.sh`
+# runs the multi-block fixtures against it to prove a 1.1.0 verifier reads the
+# first block only and never reports a gate from a later one.
 # The one copy of the attest verifier.
 #
-#   verify.sh [--signers PATH] [--principal ID] [--platform P|OS|any]
-#             [--anywhere NAMES] [--json | --github-output] [--quiet]
+#   verify.sh [--signers PATH] [--principal ID] [--platform P|any]
+#             [--json | --github-output] [--quiet]
 #
 # Prints the gate names a VALID attestation covers for the tree checked out
 # here, space-separated, on stdout. Prints NOTHING when nothing is covered.
@@ -36,14 +39,13 @@ FORMAT=amont-attest-v2
 NOTES_REF=amont-attest
 NAMESPACE=amont-attest
 
-signers=; principal=; platform=; anywhere=; quiet=; mode=plain
+signers=; principal=; platform=; quiet=; mode=plain
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --signers)   signers=${2-};   shift 2 || exit 2 ;;
         --principal) principal=${2-}; shift 2 || exit 2 ;;
         --platform)  platform=${2-};  shift 2 || exit 2 ;;
-        --anywhere)  anywhere="$anywhere ${2-}"; shift 2 || exit 2 ;;
         --json)          mode=json; shift ;;
         --github-output) mode=gha;  shift ;;
         --quiet)     quiet=1; shift ;;
@@ -186,163 +188,71 @@ trap 'rm -f "$sig_file"' EXIT
 # this script.
 field() { printf '%s\n' "$2" | awk -v k="$1" '$1 == k { sub(/^[^ ]* */, ""); print; exit }'; }
 
-# How many blocks of one note are read. Every block costs two ssh-keygen runs,
-# and the notes ref is writable by anyone with push access.
-MAX_BLOCKS=32
-
-# A note holds one or more BLOCKS — payload, blank line, armored signature —
-# since 1.2.0, so a laptop and a CI job can both attest the same tree, each on
-# its own platform. Blank lines separate blocks, which is exactly what
-# `git notes append` writes. This prints one "pstart pend sstart send" line of
-# line numbers per block, then the word `truncated` if MAX_BLOCKS was reached.
-#
-# The grammar (SPEC.md): skip blank lines; a payload runs to the first blank
-# line; skip blank lines; the next line must be the BEGIN marker, or parsing
-# STOPS and what was collected stands; the signature runs to END, and end of
-# input closes an open one. Same state machine as split_blocks() in
-# src/attest.rs. A `\r` is content, so a CRLF note has no blank line and yields
-# no block — the same answer the binary gives it.
-blocks_of() {
-    printf '%s\n' "$1" | awk -v max="$MAX_BLOCKS" \
-        -v b='-----BEGIN SSH SIGNATURE-----' -v e='-----END SSH SIGNATURE-----' '
-        function close_block() {
-            if (n == max) { print "truncated"; stop = 1; exit }
-            n++; print ps, pe, ss, NR
-        }
-        stop { next }
-        s == ""  { if ($0 == "") next; ps = NR; pe = NR; s = "p"; next }
-        s == "p" { if ($0 == "") { s = "w"; next } pe = NR; next }
-        s == "w" { if ($0 == "") next; if ($0 != b) { stop = 1; exit } ss = NR; s = "g"; next }
-        s == "g" { if ($0 == e) { close_block(); s = "" } next }
-        END { if (!stop && s == "g") close_block() }'
-}
-
-# Names of $2 not already in $1, appended: first-appearance order, no repeats.
-union() {
-    printf '%s %s\n' "$1" "$2" | awk '{
-        o = ""
-        for (i = 1; i <= NF; i++) if (!($i in seen)) { seen[$i] = 1; o = o (o == "" ? "" : " ") $i }
-        print o
-    }'
-}
-
-# Those names of $1 that also appear in $2, in the order of $1.
-intersect() {
-    printf '%s\n%s\n' "$1" "$2" | awk '
-        NR == 1 { for (i = 1; i <= NF; i++) g[i] = $i; n = NF; next }
-        { for (i = 1; i <= NF; i++) in2[$i] = 1 }
-        END { o = ""; for (i = 1; i <= n; i++) if (g[i] in in2) o = o (o == "" ? "" : " ") g[i]; print o }'
-}
-
-# Does an attestation minted on $2 satisfy the caller's $1? `any` takes all; a
-# value with a dash is an exact <arch>-<os>; an OS alone is compared to the
-# part after the LAST dash — never as a substring, so `inux` matches nothing.
-platform_matches() {
-    case $1 in
-        any) return 0 ;;
-        *-*) [ "$1" = "$2" ] ;;
-        *)   case $2 in *-*) [ "$1" = "${2##*-}" ] ;; *) return 1 ;; esac ;;
-    esac
-}
-
 # The TREE first: it is what the signature covers, so it is the only key that
 # survives a squash-merge, an amend or a rebase. HEAD and HEAD^2 follow for
 # notes written by an older producer that keyed by commit only — HEAD^2 because
 # a PR checkout is a merge commit whose second parent is the pushed tip.
-#
-# A producer writes its note to BOTH the tree and the commit, so the loop meets
-# the same note twice; it is judged once, by its oid.
-covered=; seen=; tried=
+tried=
 for candidate in "$head_tree" HEAD HEAD^2; do
     object=$(git rev-parse --verify --quiet "$candidate" 2> /dev/null) || continue
-    note_oid=$(git notes --ref "$NOTES_REF" list "$object" 2> /dev/null) || continue
-    note_oid=${note_oid%% *}
-    case " $seen " in *" $note_oid "*) continue ;; esac
-    seen="$seen $note_oid"
     body=$(git notes --ref "$NOTES_REF" show "$object" 2> /dev/null) || continue
     tried=yes
 
-    ranges=$(blocks_of "$body")
-    [ -n "$ranges" ] || { note "note on $candidate carries no signature block"; continue; }
-    nblocks=$(printf '%s\n' "$ranges" | awk '/^[0-9]/ { c++ } END { print c + 0 }')
+    # Split on the first blank line. The payload's trailing newline is part of
+    # the signed bytes, so it goes back on before verifying.
+    payload=$(printf '%s\n' "$body" | sed -n '/^$/q;p')
+    printf '%s\n' "$body" | sed -n "/^-----BEGIN SSH SIGNATURE-----\$/,\$p" > "$sig_file"
+    [ -s "$sig_file" ] || { note "note on $candidate carries no signature block"; continue; }
 
-    # A heredoc, not a pipe: a `printf | while` would run the loop in a
-    # subshell and drop everything accumulated in $covered.
-    n=0
-    while read -r ps pe ss se; do
-        [ -n "$ps" ] || continue
-        if [ "$ps" = truncated ]; then
-            note "note on $candidate has more than $MAX_BLOCKS blocks; the rest were ignored"
-            continue
-        fi
-        n=$((n + 1))
-        at=$candidate
-        [ "$nblocks" -gt 1 ] && at="$candidate block $n"
+    [ "$(printf '%s\n' "$payload" | sed -n 1p)" = "$FORMAT" ] || {
+        note "note on $candidate is not $FORMAT (a newer producer wrote it; running the tests)"
+        continue
+    }
 
-        # The payload's trailing newline is part of the signed bytes; sed
-        # prints whole lines, so it is there.
-        payload=$(printf '%s\n' "$body" | sed -n "${ps},${pe}p")
-        printf '%s\n' "$body" | sed -n "${ss},${se}p" > "$sig_file"
+    tree=$(field tree "$payload")
+    gates=$(field gates "$payload")
+    ran_on=$(field platform "$payload")
 
-        [ "$(printf '%s\n' "$payload" | sed -n 1p)" = "$FORMAT" ] || {
-            note "note on $at is not $FORMAT (a newer producer wrote it; running the tests)"
-            continue
-        }
+    # Every v2 field is required, `platform` included: a note that does not say
+    # where it ran is not evidence about anywhere, `--platform any` or not.
+    if [ -z "$tree" ] || [ -z "$ran_on" ]; then
+        note "note on $candidate is missing a required field (tree, platform)"
+        continue
+    fi
+    [ "$tree" = "$head_tree" ] || { note "attested tree $tree is not the checked-out tree $head_tree"; continue; }
+    [ -n "$gates" ] || { note "attestation lists no gates"; continue; }
 
-        tree=$(field tree "$payload")
-        gates=$(field gates "$payload")
-        ran_on=$(field platform "$payload")
+    # A pass is a pass ON SOMETHING: a macOS `cargo test` is no evidence about
+    # the Windows leg. `--platform any` is the deliberate, committed statement
+    # that a suite's result does not depend on where it ran.
+    if [ "$platform" != any ] && [ "$platform" != "$ran_on" ]; then
+        note "attested on $ran_on, this leg is $platform"
+        continue
+    fi
 
-        # Every v2 field is required, `platform` included: a note that does
-        # not say where it ran is not evidence about anywhere.
-        if [ -z "$tree" ] || [ -z "$ran_on" ]; then
-            note "note on $at is missing a required field (tree, platform)"
-            continue
-        fi
-        [ "$tree" = "$head_tree" ] || { note "attested tree $tree is not the checked-out tree $head_tree"; continue; }
-        [ -n "$gates" ] || { note "attestation lists no gates"; continue; }
+    # WHO signed, read from the signature and the file rather than guessed.
+    # `ssh-keygen -Y verify` requires a principal and checks it against the
+    # principal column, so a guessed one rejects a perfectly good signature —
+    # quietly, since every rejection here means "run the tests". The templates
+    # this replaces hardcoded `-I you@example.com`; the first release guessed
+    # the file's first entry, which silently uncovered every other signer on a
+    # team. `find-principals` answers from the key that actually signed, so a
+    # multi-signer file just works. `--principal` narrows it to one identity.
+    signer=$principal
+    if [ -z "$signer" ]; then
+        signer=$(ssh-keygen -Y find-principals -s "$sig_file" -f "$signers" 2> /dev/null | sed -n 1p)
+        [ -n "$signer" ] || { note "signature on $candidate was not made by any key in $signers"; continue; }
+    fi
 
-        # WHO signed, read from the signature and the file rather than
-        # guessed. `ssh-keygen -Y verify` requires a principal and checks it
-        # against the principal column, so a guessed one rejects a perfectly
-        # good signature — quietly. `find-principals` answers from the key that
-        # actually signed, so a multi-signer file just works; `--principal`
-        # narrows it to one identity.
-        signer=$principal
-        if [ -z "$signer" ]; then
-            signer=$(ssh-keygen -Y find-principals -s "$sig_file" -f "$signers" 2> /dev/null | sed -n 1p)
-            [ -n "$signer" ] || { note "signature on $at was not made by any key in $signers"; continue; }
-        fi
-
-        # The signature BEFORE the platform: `--anywhere` may only admit gates
-        # from a block that actually verified.
-        printf '%s\n' "$payload" | ssh-keygen -Y verify -f "$signers" \
-            -I "$signer" -n "$NAMESPACE" -s "$sig_file" > /dev/null 2>&1 || {
-            note "signature on $at does not verify as $signer against $signers"
-            continue
-        }
-
-        # A pass is a pass ON SOMETHING: a macOS `cargo test` is no evidence
-        # about the Windows leg. `--platform any` is the deliberate, committed
-        # statement that the whole suite's result does not depend on where it
-        # ran; `--anywhere` says it of the named gates only.
-        if platform_matches "$platform" "$ran_on"; then
-            covered=$(union "$covered" "$gates")
-            note "covered by $signer on $ran_on: $gates"
-            continue
-        fi
-        accepted=$(intersect "$gates" "$anywhere")
-        covered=$(union "$covered" "$accepted")
-        if [ -n "$accepted" ]; then
-            note "attested on $ran_on by $signer, this leg is $platform; accepted anywhere: $accepted"
-        else
-            note "attested on $ran_on by $signer, this leg is $platform"
-        fi
-    done <<EOF
-$ranges
-EOF
+    if printf '%s\n' "$payload" | ssh-keygen -Y verify -f "$signers" \
+        -I "$signer" -n "$NAMESPACE" -s "$sig_file" > /dev/null 2>&1; then
+        note "covered by $signer: $gates"
+        emit "$gates"
+        exit 0
+    fi
+    note "signature on $candidate does not verify as $signer against $signers"
 done
 
 [ -n "$tried" ] || note "no attestation found for tree $head_tree"
-emit "$covered"
+emit ""
 exit 0

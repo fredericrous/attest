@@ -9,7 +9,7 @@ lint: ## rustfmt + clippy + shellcheck
 	cargo fmt --all -- --check
 	cargo clippy --all-targets -- -D warnings
 	@if command -v shellcheck > /dev/null; then \
-	    shellcheck verify.sh tests/*.sh; \
+	    shellcheck verify.sh sign/sign.sh tests/*.sh; \
 	  else \
 	    echo "  (shellcheck not installed — skipped)"; \
 	  fi
@@ -37,7 +37,25 @@ conformance: ## run the fixtures against both implementations
 	    echo "  ok  legacy.sh still fails the defects it shipped with"; \
 	fi
 
-check: lint test conformance ## everything CI runs
+# A 1.1.0 verifier reads ONE block of a note. This proves what SPEC.md claims:
+# on a multi-block note it reports block 1's gates or nothing, never a gate
+# from a later block. The shell copy is frozen in the tree; the binary is built
+# from the v1.1.0 tag, which a shallow CI checkout fetches on demand.
+compat: ## prove 1.1.0 verifiers degrade safely on multi-block notes
+	@echo "--- verify.sh 1.1.0 (frozen copy) ---"
+	@./tests/compat.sh "bash $(PWD)/tests/compat/verify-1.1.0.sh --quiet"
+	@echo "--- git-attest 1.1.0 (built from the tag) ---"
+	@git rev-parse -q --verify v1.1.0 > /dev/null 2>&1 || git fetch -q --depth 1 origin tag v1.1.0
+	@rm -rf target/compat/src && mkdir -p target/compat/src
+	@git archive v1.1.0 | tar -x -C target/compat/src
+	@cargo build -q --release --manifest-path target/compat/src/Cargo.toml --target-dir target/compat/target
+	@./tests/compat.sh "$(PWD)/target/compat/target/release/git-attest covered"
+
+sign-test: ## the producer's fixtures (sign/sign.sh against a bare origin)
+	@echo "--- sign/sign.sh ---"
+	@./tests/sign.sh
+
+check: lint test conformance compat sign-test ## everything CI runs
 
 fmt: ## format
 	cargo fmt --all
@@ -48,4 +66,4 @@ msrv: ## prove the rust-version floor in Cargo.toml is real
 	  rustup toolchain install "$$v" --profile minimal 2> /dev/null || true; \
 	  cargo "+$$v" check --locked
 
-.PHONY: help lint test conformance check fmt msrv
+.PHONY: help lint test conformance compat sign-test check fmt msrv

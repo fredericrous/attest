@@ -1,0 +1,124 @@
+# Sign, from CI, the gates that just passed on this exact tree — so the next
+# job that checks out the same tree (a re-run, the push to main after a merge)
+# can skip them. `fredericrous/attest` is the verifying half.
+#
+# Put this step LAST, after every gate it names, and never under
+# `if: always()`: the default `success()` is what guarantees a failed gate is
+# never signed. The job needs `permissions: contents: write` to push the notes
+# ref; on a fork pull request there is no secret and a read-only token, and
+# both paths simply report and succeed.
+#
+# Forgejo uses the same file: `uses: https://github.com/fredericrous/attest/sign@v1`.
+name: attest-sign
+description: Sign an attestation for the gates that passed on this tree, and push it
+branding:
+  icon: edit-3
+  color: green
+
+inputs:
+  key:
+    description: >-
+      The private half of an ed25519 key whose public half is committed in
+      allowed_signers — from a secret, `${{ secrets.ATTEST_SIGNING_KEY }}`.
+      Empty on a fork pull request, which is fine: nothing is signed and the
+      step succeeds.
+    required: true
+  gates:
+    description: >-
+      Space-separated names of the gates that ACTUALLY RAN AND PASSED in this
+      job. Build it from step outcomes, so a gate that was skipped because it
+      was already attested is not re-signed on this platform:
+      "steps.test.outcome == 'success' && 'pre-push-cargo-test' || ''".
+      An empty list is not an error.
+    required: true
+  platform:
+    description: >-
+      Where the gates ran, as <arch>-<os>. Default: this runner. Do not claim
+      another platform.
+    required: false
+    default: ""
+  object:
+    description: >-
+      The object to attach the note to. Default: HEAD's tree. A commit is
+      accepted when its tree IS HEAD's tree; anything else is refused.
+    required: false
+    default: ""
+  remote:
+    description: The remote to push the notes ref to.
+    required: false
+    default: origin
+  push:
+    description: >-
+      Push refs/notes/amont-attest after signing. `false` appends to the local
+      ref only.
+    required: false
+    default: "true"
+  allow-dirty:
+    description: >-
+      Sign even if the working tree has modified or untracked files. The
+      default refuses, because the checks then did not run on HEAD's tree.
+    required: false
+    default: "false"
+  producer:
+    description: >-
+      The `amont <name>` line of the payload. Keep it stable across runs — no
+      run id, no timestamp — so a re-run recognises its own block as already
+      present instead of appending it again.
+    required: false
+    default: attest-sign
+  attempts:
+    description: How many times to retry a push rejected because another job attested the same tree meanwhile.
+    required: false
+    default: "5"
+
+outputs:
+  status:
+    description: >-
+      One of: pushed, local, already-present, no-key, bad-key, no-gates,
+      dirty, sign-failed, push-failed, error.
+    value: ${{ steps.sign.outputs.status }}
+  signed:
+    description: Whether a new block for this tree exists locally after this step.
+    value: ${{ steps.sign.outputs.signed }}
+  pushed:
+    description: Whether the remote holds a block for these gates.
+    value: ${{ steps.sign.outputs.pushed }}
+  gates:
+    description: The normalised, space-separated list that was (or would have been) signed.
+    value: ${{ steps.sign.outputs.gates }}
+
+runs:
+  using: composite
+  steps:
+    - id: sign
+      shell: bash
+      env:
+        ATTEST_KEY: ${{ inputs.key }}
+        ATTEST_GATES: ${{ inputs.gates }}
+        ATTEST_PLATFORM: ${{ inputs.platform }}
+        ATTEST_OBJECT: ${{ inputs.object }}
+        ATTEST_REMOTE: ${{ inputs.remote }}
+        ATTEST_PUSH: ${{ inputs.push }}
+        ATTEST_ALLOW_DIRTY: ${{ inputs.allow-dirty }}
+        ATTEST_PRODUCER: ${{ inputs.producer }}
+        ATTEST_ATTEMPTS: ${{ inputs.attempts }}
+      run: |
+        set -u
+        # Positional parameters rather than a bash array (bash 3.2 on macOS
+        # runners, under `set -u`). The key goes through stdin and nothing
+        # else: not argv, not a file, not the script text.
+        set --
+        if [ -n "$ATTEST_PLATFORM" ]; then set -- "$@" --platform "$ATTEST_PLATFORM"; fi
+        if [ -n "$ATTEST_OBJECT" ];   then set -- "$@" --object   "$ATTEST_OBJECT";   fi
+        if [ -n "$ATTEST_REMOTE" ];   then set -- "$@" --remote   "$ATTEST_REMOTE";   fi
+        if [ -n "$ATTEST_PRODUCER" ]; then set -- "$@" --producer "$ATTEST_PRODUCER"; fi
+        if [ -n "$ATTEST_ATTEMPTS" ]; then set -- "$@" --attempts "$ATTEST_ATTEMPTS"; fi
+        [ "$ATTEST_PUSH" = true ]        || set -- "$@" --no-push
+        [ "$ATTEST_ALLOW_DIRTY" != true ] || set -- "$@" --allow-dirty
+        # Outputs exist whatever happens; a script that could not even start
+        # still yields a well-formed, negative answer.
+        {
+          printf '%s' "$ATTEST_KEY" \
+            | bash "$GITHUB_ACTION_PATH/sign.sh" --github-output --gates "$ATTEST_GATES" "$@" \
+            || printf 'status=error\nsigned=false\npushed=false\ngates=\n'
+        } >> "$GITHUB_OUTPUT"

@@ -10,49 +10,112 @@ on:
 permissions:
   contents: read
 
+# This repository eats its own cooking: every job that runs gates verifies
+# first and signs last, so the push to main after a merge, and every re-run,
+# skips what the pull request already proved. `contents: write` on those jobs
+# is for pushing refs/notes/amont-attest and nothing else; a fork PR gets no
+# secret and a read-only token, and the sign step reports and succeeds.
 jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: shellcheck verify.sh tests/*.sh
+      - id: attest
+        uses: ./
+        with:
+          # fmt and shellcheck read text; clippy compiles under cfg and is
+          # NOT portable, so it stays on the strict platform match.
+          anywhere: ci-fmt ci-shellcheck
+      - id: fmt
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-fmt') }}
+        run: cargo fmt --all -- --check
+      - id: clippy
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-clippy') }}
+        run: cargo clippy --all-targets -- -D warnings
+      - id: shellcheck
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-shellcheck') }}
+        run: shellcheck verify.sh sign/sign.sh tests/*.sh
+      - uses: ./sign
+        with:
+          key: ${{ secrets.ATTEST_SIGNING_KEY }}
+          # ONLY what ran here. A step skipped because it was already attested
+          # has outcome == 'skipped', and re-signing it would launder someone
+          # else's platform into ours.
+          gates: >-
+            ${{ steps.fmt.outcome        == 'success' && 'ci-fmt'        || '' }}
+            ${{ steps.clippy.outcome     == 'success' && 'ci-clippy'     || '' }}
+            ${{ steps.shellcheck.outcome == 'success' && 'ci-shellcheck' || '' }}
 
   # The fixtures, against BOTH implementations, on every platform the format
   # names. macOS matters specifically: it is the platform most attestations are
   # produced on, and the one where `bash` may be 3.2, and where `mktemp` is
-  # BSD's. Windows because the format names it and the release ships it.
+  # BSD's. Windows because the format names it and the release ships it. The
+  # three legs then sign concurrently into one notes ref, which is the retry
+  # loop under real contention.
   conformance:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: attest
         uses: ./
-      - if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+      - id: test
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
         run: cargo test
         shell: bash
-      - run: make conformance
+      - id: conformance
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-conformance') }}
+        run: make conformance sign-test
         shell: bash
+      - uses: ./sign
+        with:
+          key: ${{ secrets.ATTEST_SIGNING_KEY }}
+          gates: >-
+            ${{ steps.test.outcome        == 'success' && 'pre-push-cargo-test' || '' }}
+            ${{ steps.conformance.outcome == 'success' && 'ci-conformance'      || '' }}
+
+  # A 1.1.0 verifier must read block 1 of a multi-block note and nothing
+  # else. This is the proof behind SPEC.md's compatibility claim.
+  compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: make compat
 
   # Conformance drives verify.sh directly and therefore proves nothing about
-  # the action wrapped around it — inputs, $GITHUB_OUTPUT, output plumbing.
-  # This job is the only thing that does.
+  # the actions wrapped around it — inputs, $GITHUB_OUTPUT, output plumbing.
+  # This job is the only thing that does. It is ISOLATED from the real notes
+  # ref before its first verification: origin is dropped and any fetched notes
+  # deleted, so what the repository's own producers attested cannot leak into
+  # the assertions. Fixture files live under $RUNNER_TEMP, never in the
+  # checkout, so the producer's clean-tree guard holds.
   action:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: isolate from the real attestations
+        run: |
+          set -eu
+          git remote remove origin
+          git update-ref -d refs/notes/amont-attest || true
+          # `git notes add` writes an object and needs a committer identity;
+          # a bare runner has none.
+          git config user.email ci@example.org
+          git config user.name CI
 
-      # 1. Fail-open, which is the property that matters most: this repository
-      #    carries no attestation, so the action must report nothing covered
-      #    and must not fail the job.
+      # 1. Fail-open, which is the property that matters most: no attestation
+      #    means nothing covered, and the step must not fail the job.
       - id: bare
         uses: ./
       - name: nothing covered, and the step succeeded
@@ -63,40 +126,24 @@ jobs:
           [ -z "${{ steps.bare.outputs.covered }}" ] || {
             echo "expected empty covered"; exit 1; }
 
-      # 2. Now mint a real attestation over the tree this job checked out, and
+      # 2. Mint a real attestation over the tree this job checked out, and
       #    prove the action finds, verifies and reports it.
-      - name: sign this exact tree
+      - name: sign this exact tree by hand
         run: |
           set -eu
-          # `git notes add` writes an object and needs a committer identity;
-          # a bare runner has none.
-          git config user.email ci@example.org
-          git config user.name CI
-          # Drop origin first. The verifier force-fetches refs/notes/amont-attest
-          # before reading it, which would replace the note minted below with
-          # whatever the remote holds — and this repository really does carry
-          # one, written by amont when this branch was pushed from a Mac. That
-          # is correct behaviour (CI wants the remote's note, not a local one)
-          # and it is precisely what makes a locally-seeded fixture unusable
-          # here. Without a remote the fetch fails harmlessly, as it does in
-          # any repository that has never pushed an attestation.
-          git remote remove origin
-          ssh-keygen -q -t ed25519 -N '' -C ci@example.org -f /tmp/k
-          printf '%s namespaces="amont-attest" %s\n' ci@example.org "$(cat /tmp/k.pub)" \
-            > .github/ci-signers
+          ssh-keygen -q -t ed25519 -N '' -C ci@example.org -f "$RUNNER_TEMP/k"
+          printf '%s namespaces="amont-attest" %s\n' ci@example.org "$(cat "$RUNNER_TEMP/k.pub")" \
+            > "$RUNNER_TEMP/ci-signers"
           tree=$(git rev-parse 'HEAD^{tree}')
           printf 'amont-attest-v2\ntree %s\ngates pre-push-cargo-test pre-push-clippy\nplatform x86_64-linux\namont ci\n' \
-            "$tree" > /tmp/p
-          ssh-keygen -Y sign -n amont-attest -f /tmp/k /tmp/p
-          # `-f`: the fail-open step above already fetched the real notes ref,
-          # which may well hold a (macOS, hence uncovering) note for this very
-          # tree. Overwrite it rather than refusing to add.
+            "$tree" > "$RUNNER_TEMP/p"
+          ssh-keygen -Y sign -n amont-attest -f "$RUNNER_TEMP/k" "$RUNNER_TEMP/p"
           git notes --ref amont-attest add -f \
-            -m "$(printf '%s\n\n%s' "$(cat /tmp/p)" "$(cat /tmp/p.sig)")" "$tree"
+            -m "$(printf '%s\n\n%s' "$(cat "$RUNNER_TEMP/p")" "$(cat "$RUNNER_TEMP/p.sig")")" "$tree"
       - id: signed
         uses: ./
         with:
-          signers: .github/ci-signers
+          signers: ${{ runner.temp }}/ci-signers
       - name: the attestation is reported, exactly
         run: |
           set -eu
@@ -112,7 +159,65 @@ jobs:
         if: ${{ !contains(fromJSON(steps.signed.outputs.gates), 'pre-push-audit-rust') }}
         run: echo "correctly identified as NOT covered"
 
-      # 4. The substring bug this project exists to fix. `pre-push-cargo-test`
+      # 4. The sign action: no key is a clean no-op; a real key appends a block
+      #    on another platform beside the hand-written one, and the verifier
+      #    reads both — strict match unchanged, `anywhere` takes the union.
+      - id: nokey
+        uses: ./sign
+        with:
+          key: ""
+          gates: ci-lint-only
+      - name: an empty key signs nothing and succeeds
+        run: |
+          set -eu
+          [ '${{ steps.nokey.outputs.status }}' = no-key ] || exit 1
+          [ '${{ steps.nokey.outputs.signed }}' = false ] || exit 1
+      - id: readkey
+        run: |
+          set -eu
+          {
+            echo 'key<<ATTEST_EOF'
+            cat "$RUNNER_TEMP/k"
+            echo 'ATTEST_EOF'
+          } >> "$GITHUB_OUTPUT"
+      - id: appended
+        uses: ./sign
+        with:
+          key: ${{ steps.readkey.outputs.key }}
+          gates: ci-lint-only
+          platform: aarch64-macos
+          push: false
+      - name: the block was appended locally
+        run: |
+          set -eu
+          [ '${{ steps.appended.outputs.status }}' = local ] || { echo 'status: ${{ steps.appended.outputs.status }}'; exit 1; }
+          n=$(git notes --ref amont-attest show "$(git rev-parse 'HEAD^{tree}')" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
+          [ "$n" = 2 ] || { echo "expected 2 blocks, got $n"; exit 1; }
+      - id: strict
+        uses: ./
+        with:
+          signers: ${{ runner.temp }}/ci-signers
+      - id: loose
+        uses: ./
+        with:
+          signers: ${{ runner.temp }}/ci-signers
+          anywhere: ci-lint-only
+      - id: osonly
+        uses: ./
+        with:
+          signers: ${{ runner.temp }}/ci-signers
+          platform: macos
+      - name: strict, anywhere and os-only read the two blocks as specified
+        run: |
+          set -eu
+          [ '${{ steps.strict.outputs.gates }}' = '["pre-push-cargo-test","pre-push-clippy"]' ] || {
+            echo 'strict: ${{ steps.strict.outputs.gates }}'; exit 1; }
+          [ '${{ steps.loose.outputs.gates }}' = '["pre-push-cargo-test","pre-push-clippy","ci-lint-only"]' ] || {
+            echo 'anywhere: ${{ steps.loose.outputs.gates }}'; exit 1; }
+          [ '${{ steps.osonly.outputs.gates }}' = '["ci-lint-only"]' ] || {
+            echo 'os-only: ${{ steps.osonly.outputs.gates }}'; exit 1; }
+
+      # 5. The substring bug this project exists to fix. `pre-push-cargo-test`
       #    is a substring of the covered `…-slow`, so the old string form would
       #    skip the real suite here. Array membership must not.
       - name: re-sign with only a prefix-colliding gate
@@ -120,14 +225,14 @@ jobs:
           set -eu
           tree=$(git rev-parse 'HEAD^{tree}')
           printf 'amont-attest-v2\ntree %s\ngates pre-push-cargo-test-slow\nplatform x86_64-linux\namont ci\n' \
-            "$tree" > /tmp/p2
-          ssh-keygen -Y sign -n amont-attest -f /tmp/k /tmp/p2
+            "$tree" > "$RUNNER_TEMP/p2"
+          ssh-keygen -Y sign -n amont-attest -f "$RUNNER_TEMP/k" "$RUNNER_TEMP/p2"
           git notes --ref amont-attest add -f \
-            -m "$(printf '%s\n\n%s' "$(cat /tmp/p2)" "$(cat /tmp/p2.sig)")" "$tree"
+            -m "$(printf '%s\n\n%s' "$(cat "$RUNNER_TEMP/p2")" "$(cat "$RUNNER_TEMP/p2.sig")")" "$tree"
       - id: collide
         uses: ./
         with:
-          signers: .github/ci-signers
+          signers: ${{ runner.temp }}/ci-signers
       - name: a merely-prefix-matching gate does NOT count as covered
         run: |
           set -eu

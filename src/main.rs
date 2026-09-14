@@ -11,8 +11,8 @@ mod git;
 const USAGE: &str = "\
 git-attest — what a signed attestation covers for the tree checked out here
 
-  git-attest covered [--signers PATH] [--principal ID] [--platform P|any]
-                     [--json | --github-output]
+  git-attest covered [--signers PATH] [--principal ID] [--platform P|OS|any]
+                     [--anywhere \"NAMES\"] [--json | --github-output]
   git-attest explain [same flags]
 
   covered   print the covered gate names, or nothing. Always exits 0: every
@@ -27,9 +27,14 @@ git-attest — what a signed attestation covers for the tree checked out here
                     the REPOSITORY ROOT, not the working directory
   --principal ID    accept only a signature by this identity. Default: whoever
                     the signature says, if that key is in the signers file
-  --platform P      default: this machine. `any` accepts an attestation from
+  --platform P      default: this machine, as <arch>-<os>. An OS alone (`linux`)
+                    accepts any architecture. `any` accepts an attestation from
                     anywhere, which is a claim that the suite's result does not
                     depend on where it ran.
+  --anywhere NAMES  gate names whose result cannot depend on where they ran
+                    (formatting, shell lint, secret scanning, dependency
+                    audit): a verified attestation from any platform covers
+                    them. Never a check that compiles or executes the product.
   --json            print a JSON array instead of a space-separated list
   --github-output   print `covered=` and `gates=` lines ready to append to
                     $GITHUB_OUTPUT
@@ -40,6 +45,7 @@ struct Opts {
     signers: Option<String>,
     principal: Option<String>,
     platform: Option<String>,
+    anywhere: Vec<String>,
     json: bool,
     gha: bool,
 }
@@ -55,7 +61,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         match args[i].as_str() {
             "--json" => o.json = true,
             "--github-output" => o.gha = true,
-            name @ ("--signers" | "--principal" | "--platform") => {
+            name @ ("--signers" | "--principal" | "--platform" | "--anywhere") => {
                 let value = args
                     .get(i + 1)
                     .filter(|v| !v.starts_with("--"))
@@ -64,6 +70,9 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 match name {
                     "--signers" => o.signers = Some(value),
                     "--principal" => o.principal = Some(value),
+                    "--anywhere" => o
+                        .anywhere
+                        .extend(value.split_whitespace().map(String::from)),
                     _ => o.platform = Some(value),
                 }
                 i += 1;
@@ -134,6 +143,7 @@ fn run(args: &[String]) -> u8 {
         signers,
         principal,
         platform,
+        anywhere,
         json,
         gha,
     } = match parse(&args[1..]) {
@@ -148,13 +158,12 @@ fn run(args: &[String]) -> u8 {
     // Every early return below is "nothing is covered", printed the same way
     // the covered path prints its answer — so a caller that always parses the
     // output never meets a special case.
-    let done = |gates: Option<Vec<String>>, trail: Vec<String>| -> u8 {
+    let done = |gates: Vec<String>, trail: Vec<String>| -> u8 {
         if explain {
             for step in &trail {
                 eprintln!("  {step}");
             }
         }
-        let gates = gates.unwrap_or_default();
         if gha {
             // Both forms. `covered` is the legacy string a downstream
             // `contains()` matches as a SUBSTRING; `gates` is the array form
@@ -175,7 +184,7 @@ fn run(args: &[String]) -> u8 {
         .or_else(attest::default_signers)
     else {
         return done(
-            None,
+            Vec::new(),
             vec!["no allowed_signers found (.forgejo/ or .github/) at the repository root".into()],
         );
     };
@@ -190,7 +199,7 @@ fn run(args: &[String]) -> u8 {
         None => Some(attest::platform()),
     };
 
-    let verdict = attest::evaluate(&signers, principal.as_deref(), want.as_deref());
+    let verdict = attest::evaluate(&signers, principal.as_deref(), want.as_deref(), &anywhere);
     done(verdict.gates, verdict.trail)
 }
 
@@ -236,6 +245,19 @@ mod tests {
         assert_eq!(o.principal, None);
         assert!(o.json && !o.gha);
         assert!(parse(&argv(&["--signers", "--json"])).is_err());
+    }
+
+    #[test]
+    fn anywhere_accumulates_whitespace_separated_names() {
+        let o = parse(&argv(&[
+            "--anywhere",
+            " ci-fmt\tci-shellcheck ",
+            "--anywhere",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(o.anywhere, ["ci-fmt", "ci-shellcheck", "x"]);
+        assert!(parse(&argv(&["--anywhere"])).is_err());
     }
 
     /// A typo must be refused, not skipped: `--platfrom any` that fell back to

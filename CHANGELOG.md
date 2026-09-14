@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Why so few skips, answered. With only a laptop producing and the platform
+rule applied to every gate, a macOS developer with Linux CI skipped nothing.
+Two additions, no wire-format change (the format token stays
+`amont-attest-v2`).
+
+- **Gates accepted from anywhere.** The action's `anywhere` input (CLI
+  `--anywhere`) names gates whose result cannot depend on where they ran —
+  formatting, shell lint, secret scanning, dependency audit — and admits them
+  from a verified attestation on any platform. Declared once, applied only
+  after signature verification. Not for anything that compiles or executes
+  the product, clippy included.
+- **OS-only platform matching.** `platform: linux` accepts any architecture.
+- **CI as a producer.** `fredericrous/attest/sign@v1` signs, from a job, the
+  gates that ran and passed there, and pushes the note — so the push to main
+  after a merge, a re-run, or a duplicated matrix leg skips what the pull
+  request already proved. Refuses a dirty working tree, a foreign
+  `--object`, and non-ed25519 keys; retries a push that lost a race; never
+  fails the job.
+- **Several blocks per note.** A laptop's and a CI job's attestations of the
+  same tree live in one note as blank-line-separated blocks (what `git notes
+  append` writes). Every block is judged on its own; the answer is the union.
+  At most 32 blocks are read. 1.1.0 verifiers read block 1 only and can never
+  report a later block's gates — `make compat` proves it against the frozen
+  1.1.0 shell and Rust implementations.
+- Both implementations now split lines on LF only, so a CRLF note is rejected
+  the same way by each.
+
+**Follow-up for amont:** its pre-push hook writes with `git notes add -f`,
+which erases CI's block on the next push of the same tree. Switch to `append`.
+
 ## 1.1.0
 
 An audit of 1.0.0, applied. Nothing here changes the wire format.

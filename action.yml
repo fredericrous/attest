@@ -31,8 +31,20 @@ inputs:
     description: >-
       Only accept an attestation minted on this platform, as <arch>-<os>
       (e.g. x86_64-linux). Default: the runner this step is on, so a matrix leg
-      skips only work that really ran on its own platform. Pass `any` to state
-      that the suite's result does not depend on where it ran.
+      skips only work that really ran on its own platform. An OS alone
+      (`linux`) accepts any architecture. Pass `any` to state that the whole
+      suite's result does not depend on where it ran.
+    required: false
+    default: ""
+  anywhere:
+    description: >-
+      Gate names, space-separated, whose result cannot depend on where they
+      ran: formatting, shell lint, secret scanning, dependency audit. A
+      verified attestation from ANY platform covers these, so a laptop's note
+      skips them on every leg of a matrix. This is your committed statement
+      about those checks, made once, here. Never list a check that compiles or
+      executes the product — tests, clippy, a typecheck under cfg, a build —
+      whatever its name says.
     required: false
     default: ""
 
@@ -65,6 +77,7 @@ runs:
         ATTEST_SIGNERS: ${{ inputs.signers }}
         ATTEST_PRINCIPAL: ${{ inputs.principal }}
         ATTEST_PLATFORM: ${{ inputs.platform }}
+        ATTEST_ANYWHERE: ${{ inputs.anywhere }}
       run: |
         set -u
         # Positional parameters rather than a bash array: macOS runners can
@@ -74,6 +87,7 @@ runs:
         if [ -n "$ATTEST_SIGNERS" ];   then set -- "$@" --signers   "$ATTEST_SIGNERS";   fi
         if [ -n "$ATTEST_PRINCIPAL" ]; then set -- "$@" --principal "$ATTEST_PRINCIPAL"; fi
         if [ -n "$ATTEST_PLATFORM" ];  then set -- "$@" --platform  "$ATTEST_PLATFORM";  fi
+        if [ -n "$ATTEST_ANYWHERE" ];  then set -- "$@" --anywhere  "$ATTEST_ANYWHERE";  fi
         # Reasons go to stderr and land in the job log. When an expected skip
         # does not happen, that log says which of tree, platform, signature or
         # signers was the reason — the alternative is a silent non-answer.
