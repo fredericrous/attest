@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 Why so few skips, answered. With only a laptop producing and the platform
 rule applied to every gate, a macOS developer with Linux CI skipped nothing.
