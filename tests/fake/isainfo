@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The SunOS isainfo, answering ATTEST_FAKE_ISAINFO for `-k`.
+set -u
+[ "${1:-}" = -k ] && echo "${ATTEST_FAKE_ISAINFO:-}"

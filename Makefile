@@ -9,8 +9,9 @@ lint: ## rustfmt + clippy + shellcheck
 	cargo fmt --all -- --check
 	cargo clippy --all-targets -- -D warnings
 	@./scripts/help-lists-every-flag.sh
+	@./scripts/platform-tables-match.sh
 	@if command -v shellcheck > /dev/null; then \
-	    shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git scripts/*.sh; \
+	    shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git tests/fake/* scripts/*.sh; \
 	  else \
 	    echo "  (shellcheck not installed — skipped)"; \
 	  fi

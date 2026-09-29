@@ -178,6 +178,12 @@ you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
 | `<os>` (no dash) | any `<arch>-<os>` whose part after the **last** dash is `<os>` — never a substring, so `inux` matches nothing and `x86_64` does not match `x86_64-linux` |
 | `any` | anywhere |
 
+`<arch>` and `<os>` are the names Rust's `std::env::consts` uses (`x86_64`,
+`aarch64`, `arm`, `powerpc64`; `linux`, `macos`, `windows`, `freebsd`,
+`android`, `illumos`, …). A shell implementation maps `uname` onto them, and
+a machine it names differently can only lose a skip, never gain one: the
+names must be equal to match.
+
 A pass is a pass on something: a macOS `cargo test` is no evidence about the
 Windows leg of a matrix. `any` is the caller's statement that the whole suite's
 result cannot depend on where it ran.

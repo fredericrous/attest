@@ -4,10 +4,42 @@ LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # not run. The caller sets WORK (a scratch directory it removes on exit) and
 # IMPL (the implementation command line) before sourcing.
 
-ARCH=$(uname -m); case "$ARCH" in arm64 | aarch64) ARCH=aarch64 ;; esac
-case "$(uname -s)" in Darwin) OS=macos ;; Linux) OS=linux ;; *) OS=windows ;; esac
+# platform-table:start
+# This machine as <arch>-<os>, in the names Rust's std::env::consts uses, so
+# the shell and git-attest agree. Kept byte-identical in verify.sh,
+# sign/sign.sh and tests/lib.sh; `make lint` checks that. A machine this
+# misnames can only lose a skip, never gain one.
+detect_platform() {
+    local arch os
+    arch=$(uname -m)
+    case $arch in
+        arm64 | aarch64) arch=aarch64 ;;
+        amd64 | x86_64) arch=x86_64 ;;
+        i386 | i486 | i586 | i686) arch=x86 ;;
+        armv*) arch=arm ;;
+        ppc64*) arch=powerpc64 ;;
+        ppc) arch=powerpc ;;
+    esac
+    case "$(uname -s)" in
+        Darwin) os=macos ;;
+        Linux)
+            if [ "$(uname -o 2> /dev/null)" = Android ]; then os=android; else os=linux; fi ;;
+        MINGW* | MSYS* | CYGWIN* | Windows_NT) os=windows ;;
+        SunOS)
+            if [ "$(uname -o 2> /dev/null)" = illumos ]; then os=illumos; else os=solaris; fi
+            # uname -m says i86pc there; the kernel's instruction set is the arch.
+            case "$(isainfo -k 2> /dev/null)" in
+                amd64) arch=x86_64 ;;
+                sparcv9) arch=sparc64 ;;
+            esac ;;
+        *) os=$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+    esac
+    printf '%s-%s\n' "$arch" "$os"
+}
+# platform-table:end
 # shellcheck disable=SC2034  # used by the sourcing scripts
-PLATFORM=$ARCH-$OS
+PLATFORM=$(detect_platform)
+OS=${PLATFORM##*-}
 
 PASS=0; FAIL=0; FAILED_CASES=
 
@@ -251,6 +283,37 @@ check_faulty() { # name mode expected-stdout dir [flags...]
     ATTEST_FAULT=$mode; export ATTEST_FAULT
     run_impl "$dir" "$@"
     PATH=$oldpath; unset ATTEST_FAULT ATTEST_REAL_GIT
+    if [ "$GOT" = "$want" ] && [ "$RC" -eq 0 ]; then ok "$name"
+    else fail "$name" "$(printf 'want %-28s got %s (exit %s)' "[$want]" "[$GOT]" "$RC")"; fi
+}
+
+# --- platform names (1.4.0) ------------------------------------------------
+
+# Run $IMPL as if on another machine: tests/fake/uname (and isainfo) first on
+# PATH, answering "<-s> <-m> <-o>" and an isainfo -k. Only the shell verifier
+# asks uname — git-attest's platform is fixed at compile time — so another
+# implementation is SKIPPED, visibly, as is a host where the wrapper is not
+# reached.
+check_platform() { # name "S M O" isainfo expected-stdout dir [flags...]
+    local name=$1 fake=$2 isa=$3 want=$4 dir=$5 oldpath=$PATH probe; shift 5
+    case "$IMPL" in
+        bash*) ;;
+        *) printf '  SKIP  %s (git-attest takes its platform from the compiler)\n' "$name"; return 0 ;;
+    esac
+    mkdir -p "$WORK/fake"
+    tr -d '\r' < "$LIB_DIR/fake/uname" > "$WORK/fake/uname"
+    tr -d '\r' < "$LIB_DIR/fake/isainfo" > "$WORK/fake/isainfo"
+    chmod +x "$WORK/fake/uname" "$WORK/fake/isainfo"
+    PATH="$WORK/fake:$PATH"
+    probe=$(ATTEST_FAKE_UNAME="x x x" uname --probe 2> /dev/null)
+    if [ "$probe" != attest-fake-uname ]; then
+        PATH=$oldpath
+        printf '  SKIP  %s (the fake uname is not reached here)\n' "$name"
+        return 0
+    fi
+    ATTEST_FAKE_UNAME=$fake ATTEST_FAKE_ISAINFO=$isa; export ATTEST_FAKE_UNAME ATTEST_FAKE_ISAINFO
+    run_impl "$dir" "$@"
+    PATH=$oldpath; unset ATTEST_FAKE_UNAME ATTEST_FAKE_ISAINFO
     if [ "$GOT" = "$want" ] && [ "$RC" -eq 0 ]; then ok "$name"
     else fail "$name" "$(printf 'want %-28s got %s (exit %s)' "[$want]" "[$GOT]" "$RC")"; fi
 }
