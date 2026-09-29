@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# A uname that answers for another machine, for the platform-table fixtures.
+# Prepended to PATH by tests/lib.sh's check_platform; ATTEST_FAKE_UNAME is
+# "<-s> <-m> <-o>", and `--probe` proves the wrapper is the one reached.
+set -u
+read -r s m o <<< "${ATTEST_FAKE_UNAME:?}"
+case "${1:-}" in
+    --probe) echo attest-fake-uname ;;
+    -s | '') echo "$s" ;;
+    -m) echo "$m" ;;
+    -o) echo "$o" ;;
+    *) echo "fake uname: unsupported flag $1" >&2; exit 1 ;;
+esac

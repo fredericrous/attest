@@ -79,13 +79,18 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                     .filter(|v| !v.starts_with("--"))
                     .cloned()
                     .ok_or_else(|| format!("{name} needs a value"))?;
+                // An EMPTY value means "not given", as in verify.sh and the
+                // actions, which pass an unset input as "". It is accepted
+                // here and dropped on assignment: filtered out of the value
+                // chain above, it would be "needs a value" — exit 2.
+                let given = (!value.is_empty()).then(|| value.clone());
                 match name {
-                    "--signers" => o.signers = Some(value),
-                    "--principal" => o.principal = Some(value),
+                    "--signers" => o.signers = given,
+                    "--principal" => o.principal = given,
                     "--anywhere" => o
                         .anywhere
                         .extend(value.split_whitespace().map(String::from)),
-                    _ => o.platform = Some(value),
+                    _ => o.platform = given,
                 }
                 i += 1;
             }
@@ -281,6 +286,23 @@ mod tests {
         assert_eq!(o.principal, None);
         assert!(o.json && !o.gha);
         assert!(parse(&argv(&["--signers", "--json"])).is_err());
+    }
+
+    #[test]
+    fn an_empty_value_means_not_given() {
+        let o = parse(&argv(&[
+            "--signers",
+            "",
+            "--principal",
+            "",
+            "--platform",
+            "",
+        ]))
+        .unwrap();
+        assert_eq!(o, Opts::default());
+        // The last occurrence wins, as for any flag: empty clears it.
+        let o = parse(&argv(&["--platform", "linux", "--platform", ""])).unwrap();
+        assert_eq!(o.platform, None);
     }
 
     #[test]

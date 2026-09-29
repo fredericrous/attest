@@ -134,6 +134,10 @@ check "found from a subdirectory (monorepo)" "pre-push-cargo-test" "$R/packages/
 check "relative --signers from a subdirectory" "pre-push-cargo-test" "$R/packages/api" \
     --signers .github/allowed_signers
 check "--signers to a missing file" "" "$R" --signers nope/allowed_signers
+# An empty value means "not given" — the actions pass an unset input that way.
+check "an empty --signers is the default" "pre-push-cargo-test" "$R" --signers ""
+check "an empty --principal is the default" "pre-push-cargo-test" "$R" --principal ""
+check "an empty --platform is this machine" "pre-push-cargo-test" "$R" --platform ""
 
 # The tree is what the signature covers, so an amend that preserves it keeps
 # its attestation. This is the property that survives a forge's squash-merge.
@@ -152,6 +156,22 @@ check "os-only linux matches x86_64-linux" "pre-push-cargo-test" "$R" --platform
 check "os-only is not a substring match" "" "$R" --platform inux
 check "os-only is not an arch match" "" "$R" --platform x86_64
 check "a dashed platform is still exact" "" "$R" --platform aarch64-linux
+
+# The names are Rust's std::env::consts names, whatever uname says, so a
+# note git-attest signs on a machine is one verify.sh accepts on it (1.4.0).
+plat_case() { # name "S M O" isainfo platform
+    make_repo "$R" signer@example.org "$WORK/key"
+    attach_note "$R" "$(payload_for "$R" g1 "$4")" "$WORK/key"
+    check_platform "platform: $1" "$2" "$3" "g1" "$R"
+}
+plat_case "FreeBSD/amd64 is x86_64-freebsd" "FreeBSD amd64 FreeBSD" "" x86_64-freebsd
+plat_case "Linux/armv7l is arm-linux" "Linux armv7l GNU/Linux" "" arm-linux
+plat_case "Linux/ppc64le is powerpc64-linux" "Linux ppc64le GNU/Linux" "" powerpc64-linux
+plat_case "Android is android, not linux" "Linux aarch64 Android" "" aarch64-android
+plat_case "illumos/i86pc takes its arch from isainfo" "SunOS i86pc illumos" amd64 x86_64-illumos
+plat_case "Solaris is solaris" "SunOS i86pc Solaris" amd64 x86_64-solaris
+plat_case "MINGW64 is windows" "MINGW64_NT-10.0-19045 x86_64 Msys" "" x86_64-windows
+plat_case "an unknown OS is its lowercased name" "Haiku x86_64 Haiku" "" x86_64-haiku
 
 # --- gates accepted from anywhere (1.2.0) -----------------------------------
 # The caller's committed statement that the NAMED gates cannot depend on where

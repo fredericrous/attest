@@ -278,6 +278,18 @@ expect "--platform is written as given" 0 "status=pushed|signed=true|pushed=true
 assert_eq "a foreign platform is not covered here" "$(covered_in_clone)" ""
 assert_eq "...but is on its own platform" "$(covered_in_clone --platform s390x-aix)" ci-fmt
 
+# The platform line uses the same table as the verifier (1.4.0).
+if (PATH="$HERE/tests/fake:$PATH" ATTEST_FAKE_UNAME="x x x" uname --probe 2> /dev/null) | grep -qx attest-fake-uname; then
+    make_remote_repo
+    (cd "$R" && PATH="$HERE/tests/fake:$PATH" ATTEST_FAKE_UNAME="FreeBSD amd64 FreeBSD" \
+        bash "$SIGN" --gates ci-fmt --no-push < "$WORK/key" > /dev/null 2>&1)
+    assert_eq "a FreeBSD runner signs as x86_64-freebsd" \
+        "$(git -C "$R" notes --ref attest-local/amont-attest show "$(git -C "$R" rev-parse 'HEAD^{tree}')" | awk '$1 == "platform" { print $2 }')" \
+        x86_64-freebsd
+else
+    printf '  SKIP  a FreeBSD runner signs as x86_64-freebsd (the fake uname is not reached here)\n'
+fi
+
 # --- input fingerprints (1.3.0) ---------------------------------------------
 # A committed spec: the block carries `input <gate> <fp>` for each signed
 # gate the spec declares, and is filed under K(gate, fp) in the inputs ref.
