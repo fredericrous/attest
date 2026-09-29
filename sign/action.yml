@@ -117,9 +117,17 @@ runs:
         ATTEST_ATTEMPTS: ${{ inputs.attempts }}
       run: |
         set -u
+        # The key leaves the ENVIRONMENT first: a step's env is inherited by
+        # every process it starts — git, ssh-keygen, any hook or credential
+        # helper — so it is copied into a shell variable and unset. From there
+        # it reaches sign.sh on stdin only: printf is a builtin, so it is never
+        # on an argv, and never in the script text. (sign.sh then holds it in a
+        # 0600 file of its own under a 0700 temporary directory, which it
+        # removes on every exit — ssh-keygen reads keys from nowhere else.)
+        key=$ATTEST_KEY
+        unset ATTEST_KEY
         # Positional parameters rather than a bash array (bash 3.2 on macOS
-        # runners, under `set -u`). The key goes through stdin and nothing
-        # else: not argv, not a file, not the script text.
+        # runners, under `set -u`).
         set --
         if [ -n "$ATTEST_PLATFORM" ]; then set -- "$@" --platform "$ATTEST_PLATFORM"; fi
         if [ -n "$ATTEST_OBJECT" ];   then set -- "$@" --object   "$ATTEST_OBJECT";   fi
@@ -131,7 +139,7 @@ runs:
         # Outputs exist whatever happens; a script that could not even start
         # still yields a well-formed, negative answer.
         {
-          printf '%s' "$ATTEST_KEY" \
+          printf '%s' "$key" \
             | bash "$GITHUB_ACTION_PATH/sign.sh" --github-output --gates "$ATTEST_GATES" "$@" \
             || printf 'status=error\nsigned=false\npushed=false\ngates=\ninputs=0/0\n'
         } >> "$GITHUB_OUTPUT"
