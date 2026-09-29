@@ -420,6 +420,14 @@ printf 'test src'; for _ in $(seq 64); do printf ' Cargo.toml'; done; printf '\n
 bad_spec "65 paths" "$WORK/badspec"
 printf 'test src\n'; head -c 65528 /dev/zero | tr '\0' '\n' > "$WORK/badspec"
 bad_spec "65537 bytes" "$WORK/badspec"
+printf 'test src ?\n' > "$WORK/badspec"
+bad_spec "a lone ? (names nothing)" "$WORK/badspec"
+printf 'test src ??x\n' > "$WORK/badspec"
+bad_spec "a doubled ? marker" "$WORK/badspec"
+printf 'test src ?/x\n' > "$WORK/badspec"
+bad_spec "an optional absolute path" "$WORK/badspec"
+printf 'test src x?\n' > "$WORK/badspec"
+bad_spec "a ? that is not first" "$WORK/badspec"
 # 65536 bytes, mostly newlines, is valid.
 fp_repo
 { printf 'test src Cargo.toml\n'; head -c 65516 /dev/zero | tr '\0' '\n'; } | write_spec "$R"
@@ -430,6 +438,42 @@ fp_repo
 { printf 'test src Cargo.toml\n'; for i in $(seq 63); do printf 'g%s src\n' "$i"; done; } | write_spec "$R"
 attest_fp test; move_tree "$R"
 check "fp: 64 gates are valid" "test" "$R"
+
+# Optional paths (1.4.0): `?p` may be absent, and its absence is bound.
+fp_repo "test src ?build.rs ?examples"
+attest_fp test; move_tree "$R"
+check "fp: optional paths absent, still absent: covered" "test" "$R"
+fp_repo "test src ?build.rs"
+attest_fp test
+echo 'fn main() {}' > "$R/build.rs"; git -C "$R" add -A; git -C "$R" commit -qm build
+check "fp: an absent optional path appears: nothing" "" "$R"
+fp_repo "test src ?docs"
+attest_fp test
+echo changed > "$R/docs/README.md"; git -C "$R" commit -qam docs
+check "fp: a present optional path changes: nothing" "" "$R"
+fp_repo "test ?nope"
+attest_fp test; move_tree "$R"
+check "fp: a gate of optional paths only works" "test" "$R"
+# `docs ?a/b`: the stripped path, and its ancestors' .gitattributes, as any other.
+fp_repo "test docs ?a/b"
+attest_fp test; move_tree "$R"
+check "fp: an optional nested path is listed stripped" "test" "$R"
+mkdir -p "$R/a"; echo '* -text' > "$R/a/.gitattributes"; git -C "$R" add -A; git -C "$R" commit -qm attrs
+check "fp: ...and its ancestor .gitattributes are inputs" "" "$R"
+
+# The expected fingerprint of `test src ?nope`, built by hand from the listing
+# SPEC.md defines — so the helper that computes it elsewhere is not checking
+# itself. The optional path is absent, so the listing is the spec and src.
+fp_repo "test src ?nope"
+spec_oid=$(git -C "$R" rev-parse 'HEAD:.github/attest-inputs')
+main_oid=$(git -C "$R" rev-parse 'HEAD:src/main.rs')
+hand=$(printf '100644 blob %s\t.github/attest-inputs\000100644 blob %s\tsrc/main.rs\000' "$spec_oid" "$main_oid" \
+    | git -C "$R" hash-object --stdin)
+assert_same() { if [ "$1" = "$2" ]; then ok "$3"; else fail "$3" "want [$2] got [$1]"; fi; }
+assert_same "$(fp_of "$R" test)" "$hand" "fp: the fixture helper agrees with a hand-built listing"
+attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$hand")" "$WORK/key" test "$hand"
+move_tree "$R"
+check "fp: the implementation computes the hand-built fingerprint" "test" "$R"
 
 # A declared path deleted after signing: that gate loses its fingerprint, the
 # others keep theirs.

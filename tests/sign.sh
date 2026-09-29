@@ -337,6 +337,19 @@ spec_repo 'ci-fmt src Cargo.toml' 'ci-lint nope'
 sign "$WORK/key" --gates "ci-fmt ci-lint"
 expect "spec: a gate whose path does not exist has no fingerprint" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt ci-lint|inputs=1/1"
 
+# Optional paths: absent ones are reported once, on one line, and the
+# verifier computes the same fingerprint.
+spec_repo 'ci-fmt src ?build.rs ?examples' 'ci-lint src ?examples ?.cargo'
+sign "$WORK/key" --gates "ci-fmt ci-lint"
+expect "spec: optional paths absent" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt ci-lint|inputs=2/2"
+assert_eq "spec: ...reported on exactly one line" "$(printf '%s\n' "$ERR" | grep -c 'optional paths absent')" 1
+assert_eq "spec: ...each path once" "$(printf '%s\n' "$ERR" | grep 'optional paths absent')" \
+    "attest-sign: optional paths absent (their absence is bound): .cargo build.rs examples"
+move_tree "$R"; git -C "$R" push -q origin HEAD:refs/heads/main
+assert_eq "spec: ...and a clone covers by that fingerprint" "$(covered_in_clone)" "ci-fmt ci-lint"
+sign "$WORK/key" --gates ci-fmt --quiet
+assert_eq "spec: --quiet hides the line" "$(printf '%s' "$ERR" | grep -c 'optional paths absent')" 0
+
 # Both spec locations: none.
 spec_repo
 printf 'ci-fmt src\n' | write_spec "$R" .forgejo

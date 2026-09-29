@@ -125,8 +125,10 @@ pre-push-cargo-test .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolcha
 ci-fmt              .github/workflows/ci.yaml Cargo.toml rust-toolchain.toml src
 ```
 
-A gate is then covered on any tree whose declared paths are byte-identical to
-the attested ones (producers from 1.3.0 write the fingerprint into the note;
+A leading `?` marks a path that may be absent — `?clippy.toml`, `?build.rs`:
+while it is absent the gate stays covered, and the day it appears the gate
+runs again. A gate is then covered on any tree whose declared paths are
+byte-identical to the attested ones (producers from 1.3.0 write the fingerprint into the note;
 this file is itself an input, so editing it re-runs everything once). Name
 the workflow file too: the gate name is only worth the command behind it.
 ASCII paths only, no spaces; name a parent directory instead. Over-broad is

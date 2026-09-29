@@ -254,6 +254,14 @@ before anything is parsed, and identical in both implementations:
 - A path is invalid if it starts with `:`, `/`, `./` or `../`, ends with `/`,
   contains `*`, `?`, `[`, `]` or `\`, or has an empty, `.` or `..`
   component. Spaces are unrepresentable.
+- **Optional paths** (1.4.0). One leading `?` marks a path that may be
+  absent: `?build.rs`, `?.cargo`, `?clippy.toml`. The marker is not part of
+  the path; the rest obeys every rule above, so `?`, `??x` and `?/x` are
+  invalid. A required path must exist; an optional one is listed when it
+  exists and bound by its absence when it does not — the day it appears, the
+  listing and so the fingerprint change. This is how a gate says "nothing
+  here yet, and it matters if there is": a config file that changes a tool's
+  verdict, a build script, a directory the build tool discovers by itself.
 - **Any violation invalidates the whole spec**, never one line: a line that
   silently dropped out would be one the author believes is protecting
   something.
@@ -271,8 +279,10 @@ fp = git hash-object --stdin < B         (40 hex; 64 in a sha256 repository)
 ```
 
 Preconditions, checked identically by producer and verifier: the spec is
-valid, and every declared path of `g` resolves on `T` (one `git cat-file
---batch-check` per gate; a `missing` answer disqualifies the gate). Both
+valid, and every REQUIRED declared path of `g` resolves on `T` (one `git
+cat-file --batch-check` per gate; a `missing` answer disqualifies the gate).
+Optional paths are not checked; they appear in the `ls-tree` arguments, and
+in the ancestor `.gitattributes` above, with the marker stripped. Both
 processes must succeed: if `ls-tree` exits non-zero for any reason, including
 after emitting records, `g` has no fingerprint on `T`. An empty listing is
 refused. Both spec locations are always listed, so adding, removing or
@@ -356,7 +366,12 @@ refs/notes/attest-local/…` discards them. A blanket `git push origin
 'refs/notes/*'` would publish them; push the two refs by name instead.
 
 **Compatibility.** `input` lines are additive; the format token stays
-`amont-attest-v2`. A 1.1.0 or 1.2.0 verifier reads a block that carries
+`amont-attest-v2`. A 1.3.x reader — `verify.sh` and git-attest 1.3.x, and
+amont's producer until it learns the marker — rejects a spec that uses `?` as
+a wildcard, so the whole spec is invalid there: it writes and accepts no
+fingerprint skips, and falls back to the tree. It can lose skips; it can
+never gain one. `tests/compat-fields.sh` proves it against the frozen 1.3.1
+implementations. A 1.1.0 or 1.2.0 verifier reads a block that carries
 them exactly as before, by tree, and never reaches a synthetic key.
 `tests/compat-fields.sh` proves this against the frozen 1.1.0 and 1.2.0
 implementations.

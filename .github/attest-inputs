@@ -1,7 +1,10 @@
 # <gate> <path>...   Literal paths and directories only. git ls-tree does not
-# glob: tests/*.sh would match NOTHING and silently fingerprint nothing. This
-# file is ASCII-only and is itself an input of every gate; editing it re-runs
-# everything once. The workflow is in every line on purpose: a gate name is
+# glob: tests/*.sh would match NOTHING and silently fingerprint nothing, so a
+# wildcard makes the whole file invalid. The one exception is a LEADING `?`,
+# which is not a wildcard: `?clippy.toml` names a path that may be absent and
+# whose appearance must re-run the gate. The sign step lists the absent ones
+# on one line of its log; a typo shows up there. This file is ASCII-only and
+# is itself an input of every gate; editing it re-runs everything once. The workflow is in every line on purpose: a gate name is
 # only worth the command behind it, and that command is defined there.
 ci-fmt              .github/workflows/ci.yaml Cargo.toml rust-toolchain.toml src
 ci-clippy           .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src

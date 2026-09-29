@@ -507,14 +507,24 @@ fn field<'a>(payload: &'a str, name: &str) -> Option<&'a str> {
 // Input fingerprints (1.3.0)
 // ---------------------------------------------------------------------------
 
+/// One declared path. `?src/build.rs` in the spec is `optional`: it may be
+/// absent, and its absence is then part of the fingerprint. The marker is
+/// stripped here, once, so no consumer can ever hand `?x` to git — where it
+/// would match nothing and silently drop out of the fingerprint.
+#[derive(Debug, PartialEq, Clone)]
+pub struct PathTok {
+    pub path: String,
+    pub optional: bool,
+}
+
 /// The committed declaration of which paths each gate reads.
 #[derive(Debug, PartialEq)]
 pub struct Spec {
-    pub gates: Vec<(String, Vec<String>)>,
+    pub gates: Vec<(String, Vec<PathTok>)>,
 }
 
 impl Spec {
-    pub fn paths_of(&self, gate: &str) -> Option<&[String]> {
+    pub fn paths_of(&self, gate: &str) -> Option<&[PathTok]> {
         self.gates
             .iter()
             .find(|(g, _)| g == gate)
@@ -537,6 +547,13 @@ fn valid_gate(name: &str) -> bool {
 /// nothing and silently fingerprint nothing; every other shape here is a
 /// path git would interpret rather than look up.
 fn path_error(tok: &str) -> Option<String> {
+    // One leading `?` marks an optional path; the rest obeys every rule
+    // below, so `??x` (a wildcard) and `?/x` (absolute) fail them.
+    let tok = match tok.strip_prefix('?') {
+        Some("") => return Some("path `?` names nothing".into()),
+        Some(rest) => rest,
+        None => tok,
+    };
     let bad = |why: &str| Some(format!("path `{tok}` {why}"));
     if tok.starts_with(':') {
         return bad("starts with `:` (pathspec magic is not allowed)");
@@ -583,7 +600,7 @@ pub fn parse_spec(bytes: &[u8]) -> Result<Spec, String> {
         ));
     }
     let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
-    let mut gates: Vec<(String, Vec<String>)> = Vec::new();
+    let mut gates: Vec<(String, Vec<PathTok>)> = Vec::new();
     for (n, line) in text.split('\n').enumerate() {
         let n = n + 1;
         let mut toks = line.split([' ', '\t']).filter(|t| !t.is_empty());
@@ -611,6 +628,19 @@ pub fn parse_spec(bytes: &[u8]) -> Result<Spec, String> {
                 return Err(format!("line {n}: {why}"));
             }
         }
+        let paths = paths
+            .into_iter()
+            .map(|p| match p.strip_prefix('?') {
+                Some(rest) => PathTok {
+                    path: rest.to_string(),
+                    optional: true,
+                },
+                None => PathTok {
+                    path: p,
+                    optional: false,
+                },
+            })
+            .collect();
         gates.push((gate.to_string(), paths));
         if gates.len() > MAX_SPEC_GATES {
             return Err(format!("declares more than {MAX_SPEC_GATES} gates"));
@@ -657,14 +687,25 @@ fn is_oid(s: &str) -> bool {
 /// step, or an empty listing (which would hash to the same value on every
 /// tree and is refused as an assertion).
 pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Option<String> {
-    let paths = spec.paths_of(gate)?;
-    // Every token must resolve — one `cat-file --batch-check` for all of
-    // them, never one process per token.
-    let names: String = paths.iter().map(|p| format!("{tree}:{p}\n")).collect();
-    let answers =
-        git::stdout_with_input_in(root, &["cat-file", "--batch-check"], names.as_bytes())?;
-    if answers.lines().count() != paths.len() || answers.lines().any(|l| l.ends_with(" missing")) {
-        return None;
+    let toks = spec.paths_of(gate)?;
+    let paths: Vec<String> = toks.iter().map(|t| t.path.clone()).collect();
+    // Every REQUIRED token must resolve — one `cat-file --batch-check` for
+    // all of them, never one process per token. An optional one is listed if
+    // it is there and bound by its absence if it is not.
+    let required: Vec<&str> = toks
+        .iter()
+        .filter(|t| !t.optional)
+        .map(|t| t.path.as_str())
+        .collect();
+    if !required.is_empty() {
+        let names: String = required.iter().map(|p| format!("{tree}:{p}\n")).collect();
+        let answers =
+            git::stdout_with_input_in(root, &["cat-file", "--batch-check"], names.as_bytes())?;
+        if answers.lines().count() != required.len()
+            || answers.lines().any(|l| l.ends_with(" missing"))
+        {
+            return None;
+        }
     }
     let mut args: Vec<String> = vec![
         "ls-tree".into(),
@@ -674,7 +715,7 @@ pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Option<S
         tree.to_string(),
         "--".into(),
     ];
-    args.extend(implicit_inputs(paths));
+    args.extend(implicit_inputs(&paths));
     args.extend(paths.iter().cloned());
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let listing = git::stdout_bytes_in(root, &argv)?;
@@ -1231,17 +1272,15 @@ mod tests {
         let s =
             spec_of("# a comment\n\nci-fmt\tsrc  Cargo.toml\n  # indented comment\ntest src tests")
                 .unwrap();
+        let req = |p: &str| PathTok {
+            path: p.to_string(),
+            optional: false,
+        };
         assert_eq!(
             s.gates,
             vec![
-                (
-                    "ci-fmt".to_string(),
-                    vec!["src".to_string(), "Cargo.toml".to_string()]
-                ),
-                (
-                    "test".to_string(),
-                    vec!["src".to_string(), "tests".to_string()]
-                ),
+                ("ci-fmt".to_string(), vec![req("src"), req("Cargo.toml")]),
+                ("test".to_string(), vec![req("src"), req("tests")]),
             ]
         );
         assert_eq!(s.paths_of("test").unwrap().len(), 2);
@@ -1302,6 +1341,30 @@ mod tests {
         // 64 of each is fine
         let many: String = (0..64).map(|i| format!("g{i} src\n")).collect();
         assert!(spec_of(&many).is_ok());
+    }
+
+    #[test]
+    fn optional_paths_are_marked_once_and_stripped() {
+        let s = spec_of("g src ?build.rs ?a/b/c").unwrap();
+        let toks = s.paths_of("g").unwrap();
+        assert_eq!(
+            toks.iter()
+                .map(|t| (t.path.as_str(), t.optional))
+                .collect::<Vec<_>>(),
+            [("src", false), ("build.rs", true), ("a/b/c", true)]
+        );
+        // An all-optional gate is a gate.
+        assert!(spec_of("g ?nope").is_ok());
+        // The marker is one character, first, and marks a real path.
+        for bad in [
+            "?", "??x", "?/x", "?./x", "?x/", "?:x", "x?", "?a//b", "?a/../b",
+        ] {
+            assert!(
+                spec_of(&format!("g {bad}")).is_err(),
+                "{bad} should be invalid"
+            );
+        }
+        assert!(spec_of("g ?").unwrap_err().contains("names nothing"));
     }
 
     #[test]
