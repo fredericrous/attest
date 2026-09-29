@@ -298,7 +298,9 @@ not bind external filter configuration, tool versions, or the environment;
 those are the platform line's and the gate name's business. A symlink that
 points outside the declared set, and a spec that omits something a gate
 reads, are the consumer's declaration problem — the same class as the
-`anywhere` list. A gitlink is bound by its pointer; a path inside a submodule
+`anywhere` list. A gitlink is bound by its pointer — declare the submodule's
+parent directory for that, because the submodule path itself answers
+`missing` to `cat-file` and gets no fingerprint; a path inside a submodule
 matches nothing and fails closed.
 
 **The payload line.** `input <gate> <fp>`: exactly three blank-separated
@@ -383,6 +385,35 @@ fingerprint, but every later PR that avoids the declared paths does. That is
 the two-step trust of editing a workflow file; guard `attest-inputs` the way
 `allowed_signers` is guarded. (`allowed_signers` itself is read from disk,
 the spec from the tree — the inconsistency is noted rather than deepened.)
+
+Tightening either file does not retire what was attested under the old one.
+Both are read from the tree being verified, so a pull request that puts the
+old spec (or an old signer) back, with inputs matching an old attestation,
+gets that attestation's skips: fixing an under-declared spec closes the gap
+for new trees only. The notes refs on origin are the only place an
+attestation can be withdrawn.
+
+### Revoking
+
+- **Every fingerprint skip at once:** `git push origin
+  :refs/notes/amont-attest-inputs`. A 1.4.0 verifier deletes its mirror on
+  its next run and prints how to restore it; nothing is covered by
+  fingerprint until producers sign again. Keep the old oid first —
+  `git ls-remote origin refs/notes/amont-attest-inputs` — and `git push
+  origin <oid>:refs/notes/amont-attest-inputs` restores it.
+- **Tree-keyed attestations too:** the same for `refs/notes/amont-attest`.
+- **One gate:** rename it — in the spec, the hook and the workflow. No note
+  names the new gate, so nothing old covers it.
+- **A signer:** remove the key from `allowed_signers` and revoke the refs as
+  above; removal alone does not stop a pull request that restores the key.
+
+**Order matters.** Move every producer to 1.4.0, or delete its local
+`refs/notes/amont-attest[-inputs]`, before revoking: a 1.3.x `sign.sh`
+builds its push from origin's ref plus its whole local ref, and so
+re-publishes what was revoked. Two readers do not honour a revocation yet:
+amont's own verifier (`amont attest covered`), whose fetch never deletes a
+local ref, and amont's producer, which also does not know the `?` marker —
+both are an amont follow-up.
 
 ### Fail-open is the contract
 

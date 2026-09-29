@@ -19,6 +19,21 @@ An audit of 1.3.1, applied.
   revoke such a block, so verifiers read it only with `--include-local` (the
   action's `include-local` input). A push no longer carries local blocks
   along: it publishes origin's ref plus the new block, nothing else.
+- **Optional paths in the input spec.** A leading `?` marks a path that may
+  be absent — `?build.rs`, `?clippy.toml` — whose appearance must re-run the
+  gate; it was unbindable before, since every declared path had to exist.
+  1.3.x readers reject the marker as a wildcard, so such a spec only loses
+  them fingerprint skips.
+- **This repository's own spec under-declared its cargo gates**: `tests`,
+  which cargo discovers by itself, was missing, so a new integration test
+  could have ridden an old attestation. Fixed, with the optional tool files.
+- **The weekly CI run no longer skips anything.** It exists to catch what no
+  fingerprint binds (a new runner image, new tools), and it skipped every
+  gate. Scheduled and manual runs do not verify now; write gate conditions
+  as `fromJSON(steps.attest.outputs.gates || '[]')` so a skipped attest step
+  reads as "nothing covered".
+- **Revoking is documented** (SPEC.md, "Revoking"), including why tightening
+  the spec alone does not retire old attestations.
 - **No prompts, no hangs.** Remote calls run with prompts off, ssh in batch
   mode, curl's low-speed limit, and a 15 s deadline each.
 - **The signing key stays out of child environments.** The sign action set
@@ -59,7 +74,8 @@ Three findings from a review of 1.3.0, all with fixtures now.
 - **A successful push dropped local-only blocks.** Publishing replaced the
   local notes ref with the remote-derived one, so a block written by a
   `--no-push` run vanished on the next push. Local blocks the remote lacks
-  are now carried into the updated ref, on both refs.
+  are now carried into the updated LOCAL ref, on both refs — kept there, never
+  published. (1.4.0 moves them to a ref of their own.)
 
 ## 1.3.0
 
