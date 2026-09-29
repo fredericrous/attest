@@ -404,7 +404,7 @@ says why. Implementations must therefore report their reasoning on stderr
 
 - **Do not match gate names as substrings.** `pre-push-cargo-test-slow` is not
   `pre-push-cargo-test`. Emit gates as a list and compare elements; on GitHub
-  and Forgejo that means `contains(fromJSON(outputs.gates), 'name')`, never
+  and Forgejo that means `contains(fromJSON(outputs.gates || '[]'), 'name')`, never
   `contains(outputs.covered, 'name')`.
 - **Do not resolve `allowed_signers` relative to the working directory.**
   Resolve it from the repository root, or a job that sets `working-directory`

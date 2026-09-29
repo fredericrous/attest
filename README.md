@@ -16,10 +16,10 @@ proved, and lets CI **verify** that signature and skip the work.
 
 - id: fmt
   run: cargo fmt --all -- --check
-  if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-fmt') }}
+  if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-fmt') }}
 - id: test
   run: cargo test --workspace
-  if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+  if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'pre-push-cargo-test') }}
 
 # Last, and only after every gate above: sign what THIS job ran, so the next
 # run of the same tree (a re-run, the push to main after the merge) skips it.
@@ -31,7 +31,10 @@ proved, and lets CI **verify** that signature and skip the work.
       ${{ steps.test.outcome == 'success' && 'pre-push-cargo-test' || '' }}
 ```
 
-That is the whole integration. Nothing is skipped unless a signature by a key
+That is the whole integration. The `|| '[]'` matters the day the attest step
+is skipped — say, on a scheduled run that must never skip anything: a
+skipped step's output is empty, `fromJSON('')` fails the job, and `'[]'`
+reads as "nothing covered", which runs everything. Nothing is skipped unless a signature by a key
 **you committed to the repository** covers the **exact tree** CI checked out,
 on the **same platform** the job is running — or, for the gates you named in
 `anywhere`, on any platform.

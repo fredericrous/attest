@@ -61,7 +61,8 @@ outputs:
     description: >-
       The covered gate names as a JSON array — `[]` when nothing is covered.
       USE THIS ONE, in an `if:` expression:
-      "not contains(fromJSON(steps.attest.outputs.gates), 'your-gate')".
+      "not contains(fromJSON(steps.attest.outputs.gates || '[]'), 'your-gate')";
+      the `|| '[]'` keeps the expression valid when this step was skipped.
       `contains` over an array matches ELEMENTS; over the `covered` string
       below it matches substrings, so an unrelated gate named
       `pre-push-cargo-test-slow` would satisfy a check for
