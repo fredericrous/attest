@@ -21,6 +21,19 @@ An audit of 1.3.1, applied.
   along: it publishes origin's ref plus the new block, nothing else.
 - **No prompts, no hangs.** Remote calls run with prompts off, ssh in batch
   mode, curl's low-speed limit, and a 15 s deadline each.
+- **The signing key stays out of child environments.** The sign action set
+  it as step environment, so git, ssh-keygen and any hook or credential
+  helper inherited it; it is now unset before anything runs and reaches
+  `sign.sh` on stdin only.
+- **Platform names match git-attest's.** The shell called every unknown OS
+  `windows` and passed `uname -m` through raw, so a BSD, an ARM board or an
+  illumos host never matched git-attest; one table, checked identical in all
+  three copies, now emits Rust's `std::env::consts` names.
+- **`verify.sh` could cover a gate nobody signed under that name**: `awk -v`
+  processes backslash escapes, so a signed `te\163t` resolved to the declared
+  gate `test`. Values reach awk through `ENVIRON` now.
+- An empty `--signers`, `--principal` or `--platform` means "not given" in
+  git-attest too.
 - `git-attest explain` prefixes its reasons with `attest: `, like `verify.sh`.
 
 **Upgrading.** The main ref becomes a mirror, so a block that exists only

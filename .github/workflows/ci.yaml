@@ -320,6 +320,43 @@ jobs:
         if: ${{ !contains(fromJSON(steps.collide.outputs.gates), 'pre-push-cargo-test') }}
         run: echo "the real suite would still run — correct"
 
+      # 7. The signing key never reaches a child process's environment. A spy
+      #    ssh-keygen first on PATH records whether ATTEST_KEY is set when the
+      #    sign action runs it, then execs the real one — by the absolute path
+      #    taken BEFORE PATH changes, or it would call itself. LAST in the job:
+      #    GITHUB_PATH cannot be undone for the steps after it.
+      - name: install a spy ssh-keygen
+        run: |
+          set -eu
+          real=$(command -v ssh-keygen)
+          mkdir -p "$RUNNER_TEMP/spy"
+          printf '#!/usr/bin/env bash\nprintf "%%s\\n" "${ATTEST_KEY+leaked}" >> "%s/spy.log"\nexec "%s" "$@"\n' \
+            "$RUNNER_TEMP" "$real" > "$RUNNER_TEMP/spy/ssh-keygen"
+          chmod +x "$RUNNER_TEMP/spy/ssh-keygen"
+          : > "$RUNNER_TEMP/spy.log"
+          echo "$RUNNER_TEMP/spy" >> "$GITHUB_PATH"
+      - id: readkey3
+        run: |
+          set -eu
+          {
+            echo 'key<<ATTEST_EOF'
+            cat "$RUNNER_TEMP/k"
+            echo 'ATTEST_EOF'
+          } >> "$GITHUB_OUTPUT"
+      - id: spied
+        uses: ./sign
+        with:
+          key: ${{ steps.readkey3.outputs.key }}
+          gates: ci-spy
+          push: false
+      - name: the key was not in ssh-keygen's environment
+        run: |
+          set -eu
+          [ '${{ steps.spied.outputs.status }}' = local ] || { echo 'status: ${{ steps.spied.outputs.status }}'; exit 1; }
+          [ -s "$RUNNER_TEMP/spy.log" ] || { echo "the spy was never run"; exit 1; }
+          if grep -qx leaked "$RUNNER_TEMP/spy.log"; then echo "ATTEST_KEY reached ssh-keygen"; exit 1; fi
+          echo "ssh-keygen ran $(wc -l < "$RUNNER_TEMP/spy.log") time(s) without the key in its environment"
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 10
