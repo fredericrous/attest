@@ -47,6 +47,14 @@ inputs:
       whatever its name says.
     required: false
     default: ""
+  include-local:
+    description: >-
+      `true` also reads refs/notes/attest-local/*: blocks a `sign` step wrote
+      with `push: false`, which never reached origin and so cannot be revoked
+      there. Off by default, so a persistent runner's leftovers never cover a
+      later job. Only `true`, `false` or empty; anything else fails the step.
+    required: false
+    default: "false"
 
 outputs:
   gates:
@@ -67,6 +75,15 @@ outputs:
       The same names, space-separated. Kept only so workflows written against
       the older inline templates keep working; prefer `gates`.
     value: ${{ steps.verify.outputs.covered }}
+  notes:
+    description: >-
+      What became of refs/notes/amont-attest, origin's mirror: fetched, absent
+      (origin has none; the local mirror was deleted), unreachable (origin did
+      not answer; nothing was judged), undeletable, or no-origin.
+    value: ${{ steps.verify.outputs.notes }}
+  inputs_notes:
+    description: The same, for refs/notes/amont-attest-inputs.
+    value: ${{ steps.verify.outputs.inputs_notes }}
 
 runs:
   using: composite
@@ -78,6 +95,7 @@ runs:
         ATTEST_PRINCIPAL: ${{ inputs.principal }}
         ATTEST_PLATFORM: ${{ inputs.platform }}
         ATTEST_ANYWHERE: ${{ inputs.anywhere }}
+        ATTEST_INCLUDE_LOCAL: ${{ inputs.include-local }}
       run: |
         set -u
         # Positional parameters rather than a bash array: macOS runners can
@@ -88,7 +106,21 @@ runs:
         if [ -n "$ATTEST_PRINCIPAL" ]; then set -- "$@" --principal "$ATTEST_PRINCIPAL"; fi
         if [ -n "$ATTEST_PLATFORM" ];  then set -- "$@" --platform  "$ATTEST_PLATFORM";  fi
         if [ -n "$ATTEST_ANYWHERE" ];  then set -- "$@" --anywhere  "$ATTEST_ANYWHERE";  fi
+        # Strict, like an unknown flag: a typo such as `ture` that silently
+        # meant `false` would just never cover anything.
+        case "$ATTEST_INCLUDE_LOCAL" in
+          true) set -- "$@" --include-local ;;
+          false | "") ;;
+          *) echo "attest: include-local must be true or false, not '$ATTEST_INCLUDE_LOCAL'" >&2; exit 2 ;;
+        esac
         # Reasons go to stderr and land in the job log. When an expected skip
         # does not happen, that log says which of tree, platform, signature or
         # signers was the reason — the alternative is a silent non-answer.
-        bash "$GITHUB_ACTION_PATH/verify.sh" --github-output "$@" >> "$GITHUB_OUTPUT"
+        out=$(bash "$GITHUB_ACTION_PATH/verify.sh" --github-output "$@")
+        printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
+        # A mirror nobody could fetch covers nothing, silently in the gates —
+        # so say it where a fleet-wide slowdown would otherwise hide it.
+        case "$out" in
+          *"notes=unreachable"*)
+            echo "::warning title=attest::origin's notes could not be fetched; nothing was skipped (see the log above)" ;;
+        esac

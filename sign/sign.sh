@@ -10,6 +10,10 @@
 # that checks out the same tree (a re-run, the push to main after a merge) can
 # skip what this one already ran. `verify.sh` is the other half.
 #
+# With --no-push the block goes to refs/notes/attest-local/amont-attest
+# instead: refs/notes/amont-attest is origin's mirror, and a block origin never
+# saw is one origin cannot revoke, so verifiers read it only on request.
+#
 # The private key arrives on STDIN and nowhere else: never argv, which is
 # world-readable, and never a file the caller has to clean up. ed25519 only.
 #
@@ -62,7 +66,7 @@ while [ $# -gt 0 ]; do
         --allow-dirty)  allow_dirty=1; shift ;;
         --github-output) gha=1;       shift ;;
         --quiet)     quiet=1;         shift ;;
-        -h|--help)   sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)   sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'sign.sh: unknown argument %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -317,12 +321,14 @@ gitw() {
 # that would erase every other producer's block.
 #
 # Attach the block under every object of ref $1, on the REMOTE's copy of that
-# ref, and push. Remote work happens on a TEMPORARY ref, so the local ref —
-# which may hold blocks nobody has pushed yet — is never fetched over, deleted,
-# or left half-updated. Each attempt starts from what the remote has right
-# now, appends what is missing, and pushes; a non-fast-forward rejection means
-# another job attested the same tree in the meantime, and the loop goes again.
-# Prints the outcome: pushed, already-present, push-failed or error.
+# ref, and push. Remote work happens on a TEMPORARY ref built from what the
+# remote has right now plus this block and nothing else: never the local ref,
+# so a push cannot re-publish a block origin revoked. Each attempt appends
+# what is missing and pushes; a non-fast-forward rejection means another job
+# attested the same tree in the meantime, and the loop goes again. After a
+# push to origin the local mirror is set to what was published; another
+# remote's content never enters it. Prints the outcome: pushed,
+# already-present, push-failed or error.
 publish() { # ref object...
     local ref=$1; shift
     local tref="attest-sign-$$-$ref" attempt=0 appended obj existing why
@@ -342,11 +348,7 @@ publish() { # ref object...
             echo already-present; return
         fi
         if git push --quiet "$remote" "refs/notes/$tref:refs/notes/$ref" 2> "$tmp/err"; then
-            # The local ref follows what was just published — carrying along
-            # any block that existed only locally (a --no-push run), which a
-            # plain replacement would have dropped.
-            absorb_local "$ref" "$tref"
-            git update-ref "refs/notes/$ref" "refs/notes/$tref" 2> /dev/null
+            [ "$remote" != origin ] || git update-ref "refs/notes/$ref" "refs/notes/$tref" 2> /dev/null
             git update-ref -d "refs/notes/$tref" 2> /dev/null
             echo pushed; return
         fi
@@ -367,32 +369,7 @@ publish() { # ref object...
     done
 }
 
-# Every block on the LOCAL ref $1 that the temporary ref $2 lacks, appended
-# there, so setting the local ref to the temporary one loses nothing — a
-# --no-push run's block would otherwise vanish on the next successful push.
-# Blocks are split on the END marker; one is "present" when its exact bytes
-# are. The loops run in pipeline subshells, which is fine: they only call git.
-absorb_local() { # ref tref
-    local ref=$1 tref=$2 obj local_body tmp_body from to lblock
-    git rev-parse --verify --quiet "refs/notes/$ref" > /dev/null 2>&1 || return 0
-    git notes --ref "$ref" list 2> /dev/null | while read -r _ obj; do
-        [ -n "$obj" ] || continue
-        local_body=$(git notes --ref "$ref" show "$obj" 2> /dev/null) || continue
-        tmp_body=$(git notes --ref "$tref" show "$obj" 2> /dev/null)
-        # "from to" line ranges: from the first non-blank line after the
-        # previous END marker to the next END marker.
-        printf '%s\n' "$local_body" | awk -v e='-----END SSH SIGNATURE-----' '
-            !s && $0 != "" { s = NR }
-            s && $0 == e { print s, NR; s = 0 }' | while read -r from to; do
-            lblock=$(printf '%s\n' "$local_body" | sed -n "${from},${to}p")
-            [ -n "$lblock" ] || continue
-            case $tmp_body in *"$lblock"*) continue ;; esac
-            gitw notes --ref "$tref" append -m "$lblock" "$obj" 2> /dev/null
-        done
-    done
-}
-
-# The same, locally only.
+# The same, locally only, into refs/notes/attest-local/<ref>.
 publish_local() { # ref object...
     local ref=$1; shift
     local appended obj existing
@@ -420,9 +397,9 @@ keys_n=$#
 # earlier repairs the missing keys next time: `already-present` on the main
 # ref never short-circuits the inputs ref.
 if [ -z "$push" ]; then
-    main=$(publish_local "$NOTES_REF" "$object_oid")
+    main=$(publish_local "attest-local/$NOTES_REF" "$object_oid")
     if [ "$keys_n" -gt 0 ]; then
-        case $(publish_local "$INPUTS_REF" "$@") in error) ;; *) inputs_published=$inputs_wanted ;; esac
+        case $(publish_local "attest-local/$INPUTS_REF" "$@") in error) ;; *) inputs_published=$inputs_wanted ;; esac
     fi
     case $main in
         error) say "cannot write the note"; finish error false false ;;

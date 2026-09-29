@@ -2,7 +2,8 @@
 # The one copy of the attest verifier.
 #
 #   verify.sh [--signers PATH] [--principal ID] [--platform P|OS|any]
-#             [--anywhere NAMES] [--json | --github-output] [--quiet]
+#             [--anywhere NAMES] [--include-local]
+#             [--json | --github-output] [--quiet]
 #
 # Prints the gate names a VALID attestation covers for the tree checked out
 # here, space-separated, on stdout. Prints NOTHING when nothing is covered.
@@ -29,6 +30,12 @@
 # on another platform. A CI log is exactly the place to spend four lines saying
 # which.
 #
+# `--include-local` also reads refs/notes/attest-local/*: blocks signed with
+# `sign.sh --no-push` that never reached origin, so origin cannot revoke them.
+# refs/notes/amont-attest[-inputs] themselves are ORIGIN'S MIRROR: fetched,
+# deleted when origin no longer has them, and not read at all when origin is
+# configured but cannot be reached.
+#
 # Depends on `git` and `ssh-keygen` only. See SPEC.md for the format.
 #
 # `-f`: no filesystem globbing, ever. Gate names come out of a signed note and
@@ -42,7 +49,7 @@ NOTES_REF=amont-attest
 INPUTS_REF=amont-attest-inputs
 NAMESPACE=amont-attest
 
-signers=; principal=; platform=; anywhere=; quiet=; mode=plain
+signers=; principal=; platform=; anywhere=; quiet=; mode=plain; include_local=
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -50,10 +57,11 @@ while [ $# -gt 0 ]; do
         --principal) principal=${2-}; shift 2 || exit 2 ;;
         --platform)  platform=${2-};  shift 2 || exit 2 ;;
         --anywhere)  anywhere="$anywhere ${2-}"; shift 2 || exit 2 ;;
+        --include-local) include_local=1; shift ;;
         --json)          mode=json; shift ;;
         --github-output) mode=gha;  shift ;;
         --quiet)     quiet=1; shift ;;
-        -h|--help)   sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)   sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'verify.sh: unknown argument %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -68,6 +76,9 @@ note() {
     last_note=$1
     printf 'attest: %s\n' "$1" >&2
 }
+# A line that reports a change to the repository's refs, which --quiet does
+# not hide: data went away, and the line says how to bring it back.
+note_always() { printf 'attest: %s\n' "$1" >&2; }
 
 # Gate names as a JSON array.
 #
@@ -106,10 +117,16 @@ to_json() {
 # way to say that — so a caller can parse the output unconditionally instead of
 # guarding it.
 #
-# `--github-output` emits both forms, ready to append to $GITHUB_OUTPUT:
+# `--github-output` emits both forms, ready to append to $GITHUB_OUTPUT,
+# and what became of each notes ref:
 #
 #   covered=pre-push-cargo-test        (legacy; a SUBSTRING match downstream)
 #   gates=["pre-push-cargo-test"]      (use this one)
+#   notes=fetched                      (refs/notes/amont-attest)
+#   inputs_notes=absent                (refs/notes/amont-attest-inputs)
+#
+# each one of fetched, absent, unreachable, undeletable, no-origin — or empty
+# when the verifier stopped before reading any notes.
 #
 # Both live here rather than in the two action.yml files, so the escaping above
 # has one implementation and `tests/conformance.sh` can reach it.
@@ -117,10 +134,12 @@ emit() {
     case $mode in
         plain) [ -z "$1" ] || printf '%s\n' "$1" ;;
         json)  to_json "$1" ;;
-        gha)   printf 'covered=%s\n' "$1"; printf 'gates=%s\n' "$(to_json "$1")" ;;
+        gha)   printf 'covered=%s\n' "$1"; printf 'gates=%s\n' "$(to_json "$1")"
+               printf 'notes=%s\n' "$st_main"; printf 'inputs_notes=%s\n' "$st_inputs" ;;
     esac
 }
 
+st_main=; st_inputs=
 uncovered() { note "$1"; emit ""; exit 0; }
 
 command -v git        > /dev/null 2>&1 || uncovered "no git on PATH"
@@ -142,24 +161,123 @@ else
     [ -f "$signers" ] || uncovered "$signers does not exist"
 fi
 
-# A notes ref, from origin. A repository that has never been pushed with
-# attest enabled has no such ref, and that is not an error — but a fetch that
-# fails for any OTHER reason (no credentials because the checkout step set
-# persist-credentials: false, a remote not named origin, no network) is the
-# worst shape a fail-open can take: nothing covered, forever, with CI green and
-# a log that reads as "no attestation". So the two are told apart, and only the
-# second one is reported.
-fetch_notes() { # ref
-    git fetch origin "+refs/notes/$1:refs/notes/$1" > /dev/null 2>&1 && return 0
-    # ls-remote exits 2 when the ref simply is not there; anything else is the
-    # remote being unreachable or refusing us.
-    git ls-remote --exit-code origin "refs/notes/$1" > /dev/null 2>&1; rc=$?
-    [ "$rc" -eq 2 ] && return 0
-    git rev-parse --verify --quiet "refs/notes/$1" > /dev/null 2>&1 && return 0
-    note "cannot fetch refs/notes/$1 from origin and no local copy exists (no credentials on the checkout? remote not named origin?)"
+# The notes refs, from origin. SPEC.md, "Lookup".
+#
+# refs/notes/amont-attest and refs/notes/amont-attest-inputs are ORIGIN'S
+# MIRROR, and origin is the only place an attestation can be revoked. So:
+#
+#   fetched      the fetch succeeded; the mirror is origin's ref, judged
+#   absent       origin answered and has no such ref: the local mirror is
+#                DELETED (with a line saying how to restore it), nothing judged
+#   undeletable  as absent, but the delete failed: the stale mirror is not judged
+#   unreachable  origin is configured and did not answer: not judged, because a
+#                stale mirror on a persistent runner must not outlive a revocation
+#   no-origin    no remote named origin at all: the local ref is judged as it is.
+#                That is for fixtures and local use; CI always has an origin.
+#
+# Never a prompt, never an unbounded wait: a verifier that asks for a password
+# or hangs on a dead host has broken "exit 0, always" as surely as a crash.
+remote_git() {
+    local ssh_cmd=${GIT_SSH_COMMAND:-}
+    if [ -z "$ssh_cmd" ] && ! git config --get core.sshCommand > /dev/null 2>&1; then
+        ssh_cmd='ssh -o BatchMode=yes -o ConnectTimeout=10'
+    fi
+    # Each call gets a deadline of its own: curl's low-speed limit starts only
+    # once a connection is up, and a host that drops packets never gets there.
+    # The watchdog's descriptors go to /dev/null so nothing waits on its pipe.
+    if [ -n "$ssh_cmd" ]; then
+        GIT_SSH_COMMAND=$ssh_cmd GIT_TERMINAL_PROMPT=0 \
+            git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 "$@" < /dev/null &
+    else
+        GIT_TERMINAL_PROMPT=0 \
+            git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 "$@" < /dev/null &
+    fi
+    local pid=$! watchdog rc
+    ( sleep 15; kill "$pid" ) > /dev/null 2>&1 &
+    watchdog=$!
+    wait "$pid"; rc=$?
+    kill "$watchdog" > /dev/null 2>&1
+    wait "$watchdog" 2> /dev/null
+    return "$rc"
 }
-fetch_notes "$NOTES_REF"
-fetch_notes "$INPUTS_REF"
+
+# Delete the mirror of $1 because origin has none; prints the new state.
+drop_mirror() { # ref
+    local oid
+    oid=$(git rev-parse --verify --quiet "refs/notes/$1" 2> /dev/null) || { echo absent; return; }
+    if git update-ref -d "refs/notes/$1" "$oid" > /dev/null 2>&1; then
+        note_always "origin has no refs/notes/$1; deleted the local mirror (was $oid); restore: git update-ref refs/notes/$1 $oid"
+        echo absent
+    else
+        echo undeletable
+    fi
+}
+
+sync_mirrors() {
+    local listing rc want
+    if ! git remote get-url origin > /dev/null 2>&1; then
+        st_main=no-origin; st_inputs=no-origin; return
+    fi
+    if remote_git fetch --quiet origin \
+        "+refs/notes/$NOTES_REF:refs/notes/$NOTES_REF" \
+        "+refs/notes/$INPUTS_REF:refs/notes/$INPUTS_REF" > /dev/null 2>&1; then
+        st_main=fetched; st_inputs=fetched; return
+    fi
+    # One fetch naming both refs fails when EITHER is missing, so ask which
+    # exist: exit 0 lists the ones that do, exit 2 means neither, anything
+    # else means origin did not answer.
+    listing=$(remote_git ls-remote --exit-code origin "refs/notes/$NOTES_REF" "refs/notes/$INPUTS_REF" 2> /dev/null); rc=$?
+    case $rc in
+        0)
+            want=
+            if printf '%s\n' "$listing" | awk -v r="refs/notes/$NOTES_REF" '$2 == r { f = 1 } END { exit !f }'; then
+                want="$want +refs/notes/$NOTES_REF:refs/notes/$NOTES_REF"; st_main=fetched
+            else
+                st_main=$(drop_mirror "$NOTES_REF")
+            fi
+            if printf '%s\n' "$listing" | awk -v r="refs/notes/$INPUTS_REF" '$2 == r { f = 1 } END { exit !f }'; then
+                want="$want +refs/notes/$INPUTS_REF:refs/notes/$INPUTS_REF"; st_inputs=fetched
+            else
+                st_inputs=$(drop_mirror "$INPUTS_REF")
+            fi
+            if [ -n "$want" ]; then
+                # shellcheck disable=SC2086  # refspecs, deliberately split
+                if ! remote_git fetch --quiet origin $want > /dev/null 2>&1; then
+                    [ "$st_main" = fetched ] && st_main=unreachable
+                    [ "$st_inputs" = fetched ] && st_inputs=unreachable
+                fi
+            fi ;;
+        2) st_main=$(drop_mirror "$NOTES_REF"); st_inputs=$(drop_mirror "$INPUTS_REF") ;;
+        *) st_main=unreachable; st_inputs=unreachable ;;
+    esac
+}
+sync_mirrors
+
+# Say what became of each ref, in a fixed order (both implementations do).
+say_state() { # ref state
+    case $2 in
+        unreachable) note "cannot fetch refs/notes/$1 from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything" ;;
+        undeletable) note "origin has no refs/notes/$1 but the local mirror could not be deleted (read-only .git?); local mirror not judged" ;;
+    esac
+}
+say_state "$NOTES_REF" "$st_main"
+say_state "$INPUTS_REF" "$st_inputs"
+if [ -z "$include_local" ]; then
+    for r in "$NOTES_REF" "$INPUTS_REF"; do
+        git rev-parse --verify --quiet "refs/notes/attest-local/$r" > /dev/null 2>&1 &&
+            note "refs/notes/attest-local/$r holds unpushed blocks, ignored without --include-local"
+    done
+fi
+
+# The refs each lookup reads, in order: the mirror, then the unpushed blocks.
+judged() { case $1 in fetched | no-origin) return 0 ;; *) return 1 ;; esac; }
+refs_main=; refs_inputs=
+judged "$st_main" && refs_main=$NOTES_REF
+judged "$st_inputs" && refs_inputs=$INPUTS_REF
+if [ -n "$include_local" ]; then
+    refs_main="$refs_main attest-local/$NOTES_REF"
+    refs_inputs="$refs_inputs attest-local/$INPUTS_REF"
+fi
 
 head_tree=$(git rev-parse 'HEAD^{tree}' 2> /dev/null) || uncovered "cannot resolve HEAD^{tree}"
 
@@ -536,13 +654,18 @@ $ranges
 EOF
 }
 
+# How a note is named in the log: unpushed blocks say so.
+label() { case $1 in attest-local/*) printf '%s (unpushed)' "$2" ;; *) printf '%s' "$2" ;; esac; }
+
 # The TREE first: it is what the signature covers, so it is the only key that
 # survives a squash-merge, an amend or a rebase. HEAD and HEAD^2 follow for
 # notes written by an older producer that keyed by commit only — HEAD^2 because
 # a PR checkout is a merge commit whose second parent is the pushed tip.
 for candidate in "$head_tree" HEAD HEAD^2; do
     object=$(git rev-parse --verify --quiet "$candidate" 2> /dev/null) || continue
-    judge_note "$NOTES_REF" "$object" "$candidate"
+    for r in $refs_main; do
+        judge_note "$r" "$object" "$(label "$r" "$candidate")"
+    done
 done
 
 # Then, lazily, the fingerprint-keyed notes: only for gates the spec declares
@@ -559,7 +682,9 @@ if [ -n "$spec_ok" ]; then
         fi
         k=$(input_key "$g" "$fp") || continue
         [ -n "$k" ] || continue
-        judge_note "$INPUTS_REF" "$k" "input $g $(printf '%s' "$fp" | cut -c1-12)"
+        for r in $refs_inputs; do
+            judge_note "$r" "$k" "$(label "$r" "input $g $(printf '%s' "$fp" | cut -c1-12)")"
+        done
     done < "$tmp/spec.gates"
 fi
 

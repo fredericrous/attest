@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0 (unreleased)
+
+An audit of 1.3.1, applied.
+
+- **The notes refs are origin's mirror, and revoking works.**
+  `refs/notes/amont-attest[-inputs]` follow origin: fetched, **deleted** when
+  origin no longer has them (1.3.1 kept a local copy forever, so deleting a
+  ref on origin revoked nothing in a clone that had fetched it), and not read
+  at all when origin is configured but does not answer — a stale copy on a
+  persistent runner no longer covers anything. The deletion is announced with
+  the command that restores it. New outputs `notes=` and `inputs_notes=` say
+  which of `fetched`, `absent`, `unreachable`, `undeletable`, `no-origin`
+  happened; the action warns on `unreachable`.
+- **Unpushed blocks have a ref of their own.** `sign.sh --no-push` writes to
+  `refs/notes/attest-local/*`, which a verify run never touches — 1.3.1's
+  verifier force-fetched over the local ref and dropped them. Origin cannot
+  revoke such a block, so verifiers read it only with `--include-local` (the
+  action's `include-local` input). A push no longer carries local blocks
+  along: it publishes origin's ref plus the new block, nothing else.
+- **No prompts, no hangs.** Remote calls run with prompts off, ssh in batch
+  mode, curl's low-speed limit, and a 15 s deadline each.
+- `git-attest explain` prefixes its reasons with `attest: `, like `verify.sh`.
+
+**Upgrading.** The main ref becomes a mirror, so a block that exists only
+there — a 1.3.1 `--no-push` block absorbed into it, or any note in a clone
+whose origin never had the ref — is dropped by the first 1.4.0 verify, which
+prints how to restore it. Re-sign with `--no-push` to keep one. An origin
+that is configured but unreachable now covers nothing.
+
 ## 1.3.1
 
 Three findings from a review of 1.3.0, all with fixtures now.

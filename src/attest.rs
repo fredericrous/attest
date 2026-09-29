@@ -34,6 +34,11 @@ pub const NOTES_REF: &str = "amont-attest";
 /// main ref keeps its 1.x invariant that every key is real.
 pub const INPUTS_REF: &str = "amont-attest-inputs";
 
+/// Where `sign.sh --no-push` keeps blocks that never reached origin, under
+/// `refs/notes/`, prefixed to either ref name above. Origin cannot revoke
+/// them, so a verifier reads them only when asked (`--include-local`).
+pub const LOCAL_PREFIX: &str = "attest-local/";
+
 /// The `ssh-keygen -Y` namespace. Namespaces exist so a signature minted for
 /// one purpose cannot be replayed for another; an `allowed_signers` entry
 /// pinned to this namespace accepts nothing else.
@@ -77,6 +82,12 @@ pub struct Verdict {
     /// nothing is covered.
     pub gates: Vec<String>,
     pub trail: Vec<String>,
+    /// What became of `refs/notes/amont-attest` and `…-inputs`, in that
+    /// order; `None` when the verifier stopped before reading any notes.
+    pub notes: Option<(Mirror, Mirror)>,
+    /// Lines that report a change to the repository's refs. They are shown
+    /// even without `explain`: data went away, and they say how to restore it.
+    pub loud: Vec<String>,
 }
 
 impl Verdict {
@@ -84,7 +95,44 @@ impl Verdict {
         Verdict {
             gates: Vec::new(),
             trail: vec![reason.into()],
+            notes: None,
+            loud: Vec::new(),
         }
+    }
+}
+
+/// What became of one notes ref. SPEC.md, "Lookup".
+///
+/// `refs/notes/amont-attest[-inputs]` are ORIGIN'S MIRROR, and origin is the
+/// only place an attestation can be revoked, so only a mirror that is
+/// origin's ref right now — or a repository with no origin at all, which is
+/// for fixtures and local use — is judged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mirror {
+    /// Fetched: the mirror is origin's ref.
+    Fresh,
+    /// No remote named origin: the local ref is judged as it is.
+    NoOrigin,
+    /// Origin answered and has no such ref: the mirror was deleted.
+    Deleted,
+    /// As `Deleted`, but the delete failed: the stale mirror is not judged.
+    Undeletable,
+    /// Origin is configured and did not answer: not judged.
+    Unreachable,
+}
+
+impl Mirror {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mirror::Fresh => "fetched",
+            Mirror::NoOrigin => "no-origin",
+            Mirror::Deleted => "absent",
+            Mirror::Undeletable => "undeletable",
+            Mirror::Unreachable => "unreachable",
+        }
+    }
+    fn judged(self) -> bool {
+        matches!(self, Mirror::Fresh | Mirror::NoOrigin)
     }
 }
 
@@ -202,35 +250,84 @@ pub fn verify(
     }
 }
 
-/// Fetch a notes ref from origin, and say so when that fails for a reason
-/// other than "origin has no such ref".
-///
-/// A repository never pushed with attest enabled has no such ref, and that is
-/// not an error. A fetch that fails for any OTHER reason — no credentials
-/// because the checkout step set `persist-credentials: false`, a remote not
-/// named origin, no network — is the worst shape a fail-open can take: nothing
-/// covered, forever, with CI green and a log that reads as "no attestation".
-fn fetch_notes(trail: &mut Vec<String>, notes_ref: &str) {
-    let refspec = format!("+refs/notes/{notes_ref}:refs/notes/{notes_ref}");
-    if git::succeeds(&["fetch", "origin", &refspec]) {
-        return;
+/// Delete the mirror of `notes_ref` because origin has none.
+fn drop_mirror(loud: &mut Vec<String>, notes_ref: &str) -> Mirror {
+    let full = format!("refs/notes/{notes_ref}");
+    let Some(oid) = git::stdout(&["rev-parse", "--verify", "--quiet", &full]) else {
+        return Mirror::Deleted;
+    };
+    if git::succeeds(&["update-ref", "-d", &full, &oid]) {
+        loud.push(format!(
+            "origin has no {full}; deleted the local mirror (was {oid}); restore: git update-ref {full} {oid}"
+        ));
+        Mirror::Deleted
+    } else {
+        Mirror::Undeletable
     }
-    // ls-remote exits 2 when the ref simply is not there; anything else is the
-    // remote being unreachable or refusing us.
-    let remote_ref = format!("refs/notes/{notes_ref}");
-    if git::exit_code(&["ls-remote", "--exit-code", "origin", &remote_ref]) == Some(2) {
-        return;
+}
+
+/// Bring both mirrors in line with origin, with at most two calls that can
+/// stall: one fetch of both refs and, when that fails, one `ls-remote` to
+/// tell "origin has no such ref" from "origin did not answer".
+fn sync_mirrors(loud: &mut Vec<String>) -> (Mirror, Mirror) {
+    if !git::succeeds(&["remote", "get-url", "origin"]) {
+        return (Mirror::NoOrigin, Mirror::NoOrigin);
     }
-    if git::succeeds(&["rev-parse", "--verify", "--quiet", &remote_ref]) {
-        return;
+    let main = format!("refs/notes/{NOTES_REF}");
+    let inputs = format!("refs/notes/{INPUTS_REF}");
+    let spec = |r: &str| format!("+{r}:{r}");
+    if matches!(
+        git::remote(&["fetch", "--quiet", "origin", &spec(&main), &spec(&inputs)]),
+        Some((0, _))
+    ) {
+        return (Mirror::Fresh, Mirror::Fresh);
     }
-    push_reason(
-        trail,
-        format!(
-            "cannot fetch refs/notes/{notes_ref} from origin and no local copy exists \
-             (no credentials on the checkout? remote not named origin?)"
-        ),
-    );
+    match git::remote(&["ls-remote", "--exit-code", "origin", &main, &inputs]) {
+        Some((0, listing)) => {
+            let listed = |r: &str| {
+                listing
+                    .lines()
+                    .any(|l| l.split_whitespace().nth(1) == Some(r))
+            };
+            let mut want = Vec::new();
+            let mut state = |r: &str, n: &str| {
+                if listed(r) {
+                    want.push(spec(r));
+                    Mirror::Fresh
+                } else {
+                    drop_mirror(loud, n)
+                }
+            };
+            let (mut m, mut i) = (state(&main, NOTES_REF), state(&inputs, INPUTS_REF));
+            if !want.is_empty() {
+                let mut args = vec!["fetch", "--quiet", "origin"];
+                args.extend(want.iter().map(String::as_str));
+                if !matches!(git::remote(&args), Some((0, _))) {
+                    for st in [&mut m, &mut i] {
+                        if *st == Mirror::Fresh {
+                            *st = Mirror::Unreachable;
+                        }
+                    }
+                }
+            }
+            (m, i)
+        }
+        Some((2, _)) => (drop_mirror(loud, NOTES_REF), drop_mirror(loud, INPUTS_REF)),
+        _ => (Mirror::Unreachable, Mirror::Unreachable),
+    }
+}
+
+/// The line that says why a mirror was not judged, if it was not.
+fn state_reason(notes_ref: &str, state: Mirror) -> Option<String> {
+    match state {
+        Mirror::Unreachable => Some(format!(
+            "cannot fetch refs/notes/{notes_ref} from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything"
+        )),
+        Mirror::Undeletable => Some(format!(
+            "origin has no refs/notes/{notes_ref} but the local mirror could not be deleted (read-only .git?); local mirror not judged"
+        )),
+        _ => None,
+    }
 }
 
 /// Where a repository keeps its `allowed_signers` when the caller does not say.
@@ -881,21 +978,54 @@ pub fn evaluate(
     principal: Option<&str>,
     require_platform: Option<&str>,
     anywhere: &[String],
+    include_local: bool,
 ) -> Verdict {
     let mut trail = Vec::new();
+    let mut loud = Vec::new();
 
     if !signers.is_file() {
         return Verdict::nothing(format!("{} does not exist", signers.display()));
     }
 
-    fetch_notes(&mut trail, NOTES_REF);
-    fetch_notes(&mut trail, INPUTS_REF);
+    let (st_main, st_inputs) = sync_mirrors(&mut loud);
+    let notes = Some((st_main, st_inputs));
+    for (r, st) in [(NOTES_REF, st_main), (INPUTS_REF, st_inputs)] {
+        if let Some(why) = state_reason(r, st) {
+            push_reason(&mut trail, why);
+        }
+    }
+    if !include_local {
+        for r in [NOTES_REF, INPUTS_REF] {
+            let local = format!("refs/notes/{LOCAL_PREFIX}{r}");
+            if git::succeeds(&["rev-parse", "--verify", "--quiet", &local]) {
+                push_reason(
+                    &mut trail,
+                    format!("{local} holds unpushed blocks, ignored without --include-local"),
+                );
+            }
+        }
+    }
+    // The refs each lookup reads, in order: the mirror, then the unpushed.
+    let refs = |mirror: &str, st: Mirror| -> Vec<String> {
+        let mut v = Vec::new();
+        if st.judged() {
+            v.push(mirror.to_string());
+        }
+        if include_local {
+            v.push(format!("{LOCAL_PREFIX}{mirror}"));
+        }
+        v
+    };
+    let refs_main = refs(NOTES_REF, st_main);
+    let refs_inputs = refs(INPUTS_REF, st_inputs);
 
     let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]).map(PathBuf::from) else {
         push_reason(&mut trail, "not a git repository".into());
         return Verdict {
             gates: Vec::new(),
             trail,
+            notes,
+            loud,
         };
     };
     let Some(head_tree) = git::stdout(&["rev-parse", "HEAD^{tree}"]) else {
@@ -906,6 +1036,8 @@ pub fn evaluate(
         return Verdict {
             gates: Vec::new(),
             trail,
+            notes,
+            loud,
         };
     };
 
@@ -937,7 +1069,9 @@ pub fn evaluate(
         let Some(object) = git::stdout(&["rev-parse", "--verify", "--quiet", candidate]) else {
             continue;
         };
-        judge.judge(NOTES_REF, &object, candidate);
+        for r in &refs_main {
+            judge.judge(r, &object, &label(r, candidate));
+        }
     }
 
     // Then, lazily, the fingerprint-keyed notes: only for gates the spec
@@ -963,7 +1097,9 @@ pub fn evaluate(
             continue;
         };
         let at = format!("input {gate} {}", &fp[..12]);
-        judge.judge(INPUTS_REF, &k, &at);
+        for r in &refs_inputs {
+            judge.judge(r, &k, &label(r, &at));
+        }
     }
 
     if !judge.tried {
@@ -975,6 +1111,17 @@ pub fn evaluate(
     Verdict {
         gates: judge.covered,
         trail: judge.trail,
+        notes,
+        loud,
+    }
+}
+
+/// How a note is named in the trail: unpushed blocks say so.
+fn label(notes_ref: &str, at: &str) -> String {
+    if notes_ref.starts_with(LOCAL_PREFIX) {
+        format!("{at} (unpushed)")
+    } else {
+        at.to_string()
     }
 }
 

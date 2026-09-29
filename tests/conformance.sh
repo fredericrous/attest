@@ -512,6 +512,28 @@ attach_note "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key
 attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
 check "fp: covered by tree and by fingerprint, listed once" "test" "$R"
 
+# --- unpushed blocks (1.4.0) ------------------------------------------------
+# `sign.sh --no-push` writes to refs/notes/attest-local/*, which origin cannot
+# revoke, so a verifier reads it only when asked.
+make_repo "$R" signer@example.org "$WORK/key"
+note_in attest-local/amont-attest "$R" "$(sign_block "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key")"
+check "an unpushed block is ignored by default" "" "$R"
+check "an unpushed block counts with --include-local" "g1" "$R" --include-local
+
+# The visit order is part of the contract, because the verification budget
+# depends on it: for each candidate, the mirror, then the unpushed blocks.
+# 32 strangers on the tree in each ref spend the budget before HEAD is
+# reached; visiting ref by ref instead would reach the valid block on HEAD.
+make_repo "$R" signer@example.org "$WORK/key"
+stranger_n() { sign_block "$R" "$(payload_for "$R" "s$1" "$PLATFORM")" "$WORK/other"; }
+strangers_in() { local i; for i in $(seq "$1" "$2"); do stranger_n "$i"; [ "$i" -lt "$2" ] && printf '\n\n'; done; }
+note_in amont-attest "$R" "$(strangers_in 1 32)"
+note_in attest-local/amont-attest "$R" "$(strangers_in 33 64)"
+note_in amont-attest "$R" "$(sign_block "$R" "$(payload_for "$R" g1 "$PLATFORM")" "$WORK/key")" HEAD
+check "order: candidate by candidate, mirror then unpushed" "" "$R" --include-local
+note_in attest-local/amont-attest "$R" "$(strangers_in 33 63)"
+check "order: 63 verifications leave room for HEAD" "g1" "$R" --include-local
+
 # --- gate names are literal, never globs ------------------------------------
 # A signed gate called `pre-push-*` next to a FILE called pre-push-cargo-test
 # must come out as `pre-push-*`, not as the file's name: word-splitting the
@@ -546,11 +568,15 @@ if [ "${SKIP_JSON:-}" != 1 ]; then
     make_repo "$R" signer@example.org "$WORK/key"
     attach_note "$R" "$(payload_for "$R" "pre-push-cargo-test pre-push-clippy" "$PLATFORM")" "$WORK/key"
     check "github-output emits both forms" \
-        'covered=pre-push-cargo-test pre-push-clippy gates=["pre-push-cargo-test","pre-push-clippy"]' \
+        'covered=pre-push-cargo-test pre-push-clippy gates=["pre-push-cargo-test","pre-push-clippy"] notes=no-origin inputs_notes=no-origin' \
         "$R" --github-output
     make_repo "$R" signer@example.org "$WORK/key"
     check "github-output when uncovered is still well-formed" \
-        'covered= gates=[]' "$R" --github-output
+        'covered= gates=[] notes=no-origin inputs_notes=no-origin' "$R" --github-output
+    # Stopped before reading any notes: the state lines are there, empty.
+    rm -f "$R/.github/allowed_signers"
+    check "github-output before any notes were read" \
+        'covered= gates=[] notes= inputs_notes=' "$R" --github-output
 fi
 
 summary

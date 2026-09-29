@@ -2,6 +2,8 @@
 # The producer's contract, as fixtures: sign/sign.sh against a bare `origin`.
 #
 #   tests/sign.sh                # uses ./verify.sh to read back what was signed
+#   ATTEST_IMPL="target/release/git-attest covered" tests/sign.sh
+#                                # ...or any other verifier
 #
 # Every case asserts three things where they apply: the exit code (0 always,
 # 2 for a usage error), the four --github-output lines, and what verify.sh
@@ -13,7 +15,7 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 SIGN="$HERE/sign/sign.sh"
 VERIFY="$HERE/verify.sh"
 # shellcheck disable=SC2034  # read by lib.sh
-IMPL="bash $VERIFY --quiet"
+IMPL=${ATTEST_IMPL:-"bash $VERIFY --quiet"}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 # The helper is sourced, which shellcheck follows only under -x; the hook
@@ -66,7 +68,9 @@ covered_in_clone() { # [flags...]
 
 count_blocks() { grep -c '^-----BEGIN SSH SIGNATURE-----$'; }
 remote_blocks() { git --git-dir="$ORIGIN" notes --ref amont-attest show "$(git -C "$R" rev-parse 'HEAD^{tree}')" 2> /dev/null | count_blocks; }
+# The local MIRROR of origin's ref, and the unpushed blocks beside it.
 local_blocks()  { git -C "$R" notes --ref amont-attest show "$(git -C "$R" rev-parse 'HEAD^{tree}')" 2> /dev/null | count_blocks; }
+unpushed_blocks() { git -C "$R" notes --ref attest-local/amont-attest show "$(git -C "$R" rev-parse 'HEAD^{tree}')" 2> /dev/null | count_blocks; }
 retried()       { case $ERR in *retrying*) return 0 ;; *) return 1 ;; esac; }
 
 # --- the happy path -------------------------------------------------------
@@ -91,31 +95,36 @@ assert_eq "the developer's block survives" "$(remote_blocks)" 2
 assert_eq "both blocks verify in a clone" "$(covered_in_clone --platform any)" "pre-push-cargo-test ci-fmt"
 
 # --- local only ------------------------------------------------------------
+# An unpushed block lives in refs/notes/attest-local/*, never in the mirror,
+# so a verify run (which re-syncs the mirror with origin) cannot drop it.
 make_remote_repo
 sign "$WORK/key" --gates ci-fmt --no-push
 expect "--no-push appends locally" 0 "status=local|signed=true|pushed=false|gates=ci-fmt|inputs=0/0"
-assert_eq "local note written" "$(local_blocks)" 1
+assert_eq "the unpushed block is in attest-local" "$(unpushed_blocks)" 1
+assert_eq "...not in the mirror" "$(local_blocks)" 0
 if git --git-dir="$ORIGIN" rev-parse --verify --quiet refs/notes/amont-attest > /dev/null 2>&1; then
     fail "remote untouched by --no-push" "remote has the ref"
 else
     ok "remote untouched by --no-push"
 fi
-check "verify.sh reads the local block" "ci-fmt" "$R"
+check "the verifier ignores the unpushed block by default" "" "$R"
+check "...and reads it with --include-local" "ci-fmt" "$R" --include-local
+assert_eq "the unpushed block survives a verify run" "$(unpushed_blocks)" 1
 
 # --- local blocks survive a failed push ------------------------------------
 # An unpublished local block, then a push that cannot succeed: the local ref
 # is byte-identical before and after, and the outcome is push-failed.
 make_remote_repo
 sign "$WORK/key" --gates ci-fmt --no-push > /dev/null 2>&1
-before=$(git -C "$R" rev-parse refs/notes/amont-attest)
+before=$(git -C "$R" rev-parse refs/notes/attest-local/amont-attest)
 git -C "$R" remote remove origin
 sign "$WORK/key" --gates ci-shellcheck
 expect "no origin at all: push-failed" 0 "status=push-failed|signed=false|pushed=false|gates=ci-shellcheck|inputs=0/0"
-assert_eq "local ref untouched (no origin)" "$(git -C "$R" rev-parse refs/notes/amont-attest)" "$before"
+assert_eq "local ref untouched (no origin)" "$(git -C "$R" rev-parse refs/notes/attest-local/amont-attest)" "$before"
 git -C "$R" remote add origin "file:///nonexistent/repo.git"
 sign "$WORK/key" --gates ci-shellcheck
 expect "unreachable origin: push-failed" 0 "status=push-failed|signed=false|pushed=false|gates=ci-shellcheck|inputs=0/0"
-assert_eq "local ref untouched (unreachable)" "$(git -C "$R" rev-parse refs/notes/amont-attest)" "$before"
+assert_eq "local ref untouched (unreachable)" "$(git -C "$R" rev-parse refs/notes/attest-local/amont-attest)" "$before"
 if retried; then fail "an unreachable remote is not retried" "$ERR"; else ok "an unreachable remote is not retried"; fi
 assert_eq "no temporary ref left behind" "$(git -C "$R" for-each-ref 'refs/notes/attest-sign-*')" ""
 
@@ -232,15 +241,24 @@ expect "a failing git status refuses to sign, even with --allow-dirty" 0 "status
 sign "$WORK/key" --gates ci-fmt --allow-dirty
 expect "...--allow-dirty does not override a failing status" 0 "status=error|signed=false|pushed=false|gates=ci-fmt|inputs=0/0"
 
-# A block that exists only locally survives a later successful push: the
-# local ref ends up holding both, the remote only what was pushed.
+# A block that exists only locally survives a later successful push, in its
+# own ref; the mirror and the remote hold only what was pushed.
 make_remote_repo
 sign "$WORK/key" --gates local-gate --no-push
 expect "a local-only block first" 0 "status=local|signed=true|pushed=false|gates=local-gate|inputs=0/0"
 sign "$WORK/key" --gates pushed-gate
 expect "then a pushed one" 0 "status=pushed|signed=true|pushed=true|gates=pushed-gate|inputs=0/0"
-assert_eq "the local ref kept the local-only block" "$(local_blocks)" 2
+assert_eq "the local-only block is still unpushed" "$(unpushed_blocks)" 1
+assert_eq "the mirror holds only the pushed one" "$(local_blocks)" 1
 assert_eq "the remote holds only the pushed one" "$(remote_blocks)" 1
+
+# A push to another remote never enters origin's mirror.
+make_remote_repo
+rm -rf "$WORK/other.git"; git init -q --bare "$WORK/other.git"
+git -C "$R" remote add other "$WORK/other.git"
+sign "$WORK/key" --gates ci-fmt --remote other
+expect "a push to another remote" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt|inputs=0/0"
+assert_eq "...leaves origin's mirror alone" "$(local_blocks)" 0
 
 # --- --object --------------------------------------------------------------
 make_remote_repo
@@ -326,7 +344,7 @@ fp_fmt=$(fp_of "$R" ci-fmt)
 sign "$WORK/key" --gates ci-fmt --no-push
 expect "spec: --no-push appends locally to both refs" 0 "status=local|signed=true|pushed=false|gates=ci-fmt|inputs=1/1"
 assert_eq "spec: ...local inputs ref has the key" \
-    "$(git -C "$R" notes --ref amont-attest-inputs show "$(input_key "$R" ci-fmt "$fp_fmt")" 2> /dev/null | count_blocks)" 1
+    "$(git -C "$R" notes --ref attest-local/amont-attest-inputs show "$(input_key "$R" ci-fmt "$fp_fmt")" 2> /dev/null | count_blocks)" 1
 
 # Partial publication: the inputs ref refused, the main ref not. A later run
 # repairs the keys without touching the main ref.
@@ -353,7 +371,145 @@ sign "$WORK/key" --gates ci-lint --no-push
 sign "$WORK/key" --gates ci-fmt
 expect "inputs: a pushed block after a local-only one" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt|inputs=1/1"
 assert_eq "inputs: the local-only key survived" \
-    "$(git -C "$R" notes --ref amont-attest-inputs show "$(input_key "$R" ci-lint "$fp_lint")" 2> /dev/null | count_blocks)" 1
+    "$(git -C "$R" notes --ref attest-local/amont-attest-inputs show "$(input_key "$R" ci-lint "$fp_lint")" 2> /dev/null | count_blocks)" 1
 assert_eq "inputs: the pushed key is there too" "$(remote_input_blocks ci-fmt "$fp_fmt")" 1
+
+# --- origin's mirror (1.4.0) -------------------------------------------------
+# refs/notes/amont-attest[-inputs] follow origin, which is the only place an
+# attestation can be revoked. SPEC.md, "Lookup".
+
+# The reasons, on stderr, from the verifier's explaining form.
+explain_in() { # dir [flags...]
+    local dir=$1; shift
+    # shellcheck disable=SC2046,SC2086  # the command line word-splits on purpose
+    ERR=$(cd "$dir" && set -- $(explain_impl) "$@" && "$@" 2>&1 > /dev/null < /dev/null)
+}
+gha_in() { # dir [flags...] -> the notes= and inputs_notes= lines, joined
+    run_impl "$1" --github-output "${@:2}"
+    printf '%s' "$GOT" | tr ' ' '\n' | grep -E '^(inputs_)?notes=' | tr '\n' ' ' | sed 's/ $//'
+}
+has_ref() { git -C "$1" rev-parse --verify --quiet "$2" > /dev/null 2>&1; }
+
+# Revocation: a pushed gate, then origin's ref deleted. The signer's clone and
+# a fresh one both cover nothing, and the signer's next push brings nothing back.
+make_remote_repo
+sign "$WORK/key" --gates ci-fmt
+git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest
+check "revoked on origin: the signer's clone covers nothing" "" "$R"
+if has_ref "$R" refs/notes/amont-attest; then fail "...and its mirror is gone" "still there"; else ok "...and its mirror is gone"; fi
+assert_eq "revoked on origin: a fresh clone covers nothing" "$(covered_in_clone)" ""
+sign "$WORK/key" --gates ci-other
+assert_eq "the signer's next push does not bring it back" "$(covered_in_clone)" "ci-other"
+
+# A 1.3.1-style clone: its local ref holds what origin used to have, origin
+# has nothing. The mirror is deleted, loudly, with a restore command that works.
+make_remote_repo
+append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
+old=$(git -C "$R" rev-parse refs/notes/amont-attest)
+check "a stale mirror with nothing on origin covers nothing" "" "$R"
+make_remote_repo
+append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
+old=$(git -C "$R" rev-parse refs/notes/amont-attest)
+explain_in "$R"
+want="attest: origin has no refs/notes/amont-attest; deleted the local mirror (was $old); restore: git update-ref refs/notes/amont-attest $old"
+case $ERR in *"$want"*) ok "the deletion is announced with its restore command" ;; *) fail "the deletion is announced with its restore command" "$ERR" ;; esac
+git -C "$R" update-ref refs/notes/amont-attest "$old"
+assert_eq "...and the restore command brings the ref back" "$(git -C "$R" rev-parse refs/notes/amont-attest)" "$old"
+
+# Origin reachable, neither ref there: both absent, both mirrors deleted.
+make_remote_repo
+append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
+git -C "$R" notes --ref amont-attest-inputs add -m x HEAD 2> /dev/null
+assert_eq "origin with neither ref" "$(gha_in "$R")" "notes=absent inputs_notes=absent"
+if has_ref "$R" refs/notes/amont-attest || has_ref "$R" refs/notes/amont-attest-inputs; then
+    fail "...both mirrors deleted" "one survived"
+else
+    ok "...both mirrors deleted"
+fi
+# Only the main ref on origin: that one fetched, the other absent.
+make_remote_repo
+sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
+git -C "$R" notes --ref amont-attest-inputs add -m x HEAD 2> /dev/null
+assert_eq "origin with only the main ref" "$(gha_in "$R")" "notes=fetched inputs_notes=absent"
+
+# Origin configured but unreachable: a populated mirror is NOT judged, and
+# the reason is exact (and identical in both implementations).
+make_remote_repo
+sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
+git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
+check "an unreachable origin: the mirror is not judged" "" "$R"
+assert_eq "...notes says so" "$(gha_in "$R")" "notes=unreachable inputs_notes=unreachable"
+explain_in "$R"
+want="attest: cannot fetch refs/notes/amont-attest from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything
+attest: cannot fetch refs/notes/amont-attest-inputs from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything"
+assert_eq "...with the exact reasons first" "$(printf '%s\n' "$ERR" | head -2)" "$want"
+if has_ref "$R" refs/notes/amont-attest; then ok "...and the mirror is kept for when origin answers"; else fail "...and the mirror is kept" "deleted"; fi
+
+# An unpushed block beside an ignored one says how to include it.
+make_remote_repo
+sign "$WORK/key" --gates ci-fmt --no-push > /dev/null 2>&1
+explain_in "$R"
+case $ERR in *"attest: refs/notes/attest-local/amont-attest holds unpushed blocks, ignored without --include-local"*) ok "ignored unpushed blocks are named" ;; *) fail "ignored unpushed blocks are named" "$ERR" ;; esac
+
+# A stalled http origin — connection accepted, nothing ever sent back — is
+# bounded: at most two remote calls, each cut off after 10 s of silence.
+PY=$(command -v python3 || command -v python || true)
+if [ -n "$PY" ] && [ "$OS" != windows ]; then
+    "$PY" -c '
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(16)
+print(s.getsockname()[1], flush=True)
+conns = []
+while True:
+    c, _ = s.accept(); conns.append(c)
+' > "$WORK/port" &
+    listener=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WORK/port" ] && break; sleep 1; done
+    make_remote_repo
+    git -C "$R" remote set-url origin "http://127.0.0.1:$(cat "$WORK/port")/repo.git"
+    t0=$(date +%s)
+    got=$(gha_in "$R")
+    t=$(( $(date +%s) - t0 ))
+    kill "$listener" 2> /dev/null; wait "$listener" 2> /dev/null
+    assert_eq "a stalled http origin is unreachable" "$got" "notes=unreachable inputs_notes=unreachable"
+    if [ "$t" -le 30 ]; then ok "...within 30 s (took ${t} s)"; else fail "...within 30 s" "took ${t} s"; fi
+else
+    printf '  SKIP  a stalled http origin (no python here, or Windows)\n'
+fi
+
+# Never a prompt: every remote call runs with prompts off and ssh in batch
+# mode. The faulty-git wrapper records what fetch and ls-remote saw.
+make_remote_repo
+git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
+case "$IMPL" in bash*) native= ;; *) native=1 ;; esac
+if [ -n "$native" ] && [ "$OS" = windows ]; then
+    printf '  SKIP  remote calls never prompt (the faulty-git wrapper cannot reach a native binary on Windows)\n'
+else
+    mkdir -p "$WORK/fault"; tr -d '\r' < "$HERE/tests/fault/git" > "$WORK/fault/git"; chmod +x "$WORK/fault/git"
+    : > "$WORK/fault.log"
+    ATTEST_REAL_GIT=$(command -v git) ATTEST_FAULT=env ATTEST_FAULT_LOG="$WORK/fault.log" GIT_SSH_COMMAND='' \
+        PATH="$WORK/fault:$PATH" run_impl "$R"
+    seen=$(sort -u "$WORK/fault.log" | tr '\n' '|')
+    assert_eq "remote calls never prompt" "$seen" "0|ssh -o BatchMode=yes -o ConnectTimeout=10|"
+fi
+
+# The mirror cannot be deleted (a read-only .git): it is not judged either.
+# The premise is checked first — root, reftable and packed refs all delete
+# anyway — and the case says SKIP rather than passing for the wrong reason.
+make_remote_repo
+append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
+git -C "$R" update-ref refs/notes/attest-scratch HEAD
+restore_perm() { chmod u+w "$R/.git/refs/notes" 2> /dev/null; }
+trap 'restore_perm; rm -rf "$WORK"' EXIT
+trap 'restore_perm; exit 130' INT TERM
+chmod a-w "$R/.git/refs/notes" 2> /dev/null
+if [ "$OS" != windows ] && ! git -C "$R" update-ref -d refs/notes/attest-scratch 2> /dev/null; then
+    assert_eq "an undeletable mirror is not judged" "$(gha_in "$R")" "notes=undeletable inputs_notes=absent"
+    check "...and covers nothing" "" "$R"
+else
+    printf '  SKIP  an undeletable mirror (a read-only refs dir still deletes here)\n'
+fi
+restore_perm
+trap 'rm -rf "$WORK"' EXIT
 
 summary

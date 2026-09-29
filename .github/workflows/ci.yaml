@@ -37,7 +37,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - id: shellcheck
         if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-shellcheck') }}
-        run: shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git
+        run: shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git scripts/*.sh
       - uses: ./sign
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
@@ -97,10 +97,12 @@ jobs:
   # Conformance drives verify.sh directly and therefore proves nothing about
   # the actions wrapped around it — inputs, $GITHUB_OUTPUT, output plumbing.
   # This job is the only thing that does. It is ISOLATED from the real notes
-  # ref before its first verification: origin is dropped and any fetched notes
-  # deleted, so what the repository's own producers attested cannot leak into
-  # the assertions. Fixture files live under $RUNNER_TEMP, never in the
-  # checkout, so the producer's clean-tree guard holds.
+  # ref before its first verification: origin is pointed at an empty bare
+  # repository, so what the repository's own producers attested cannot leak
+  # into the assertions — and since the local notes ref is origin's mirror,
+  # every note this job writes by hand is pushed there. Fixture files live
+  # under $RUNNER_TEMP, never in the checkout, so the producer's clean-tree
+  # guard holds.
   action:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -109,7 +111,8 @@ jobs:
       - name: isolate from the real attestations
         run: |
           set -eu
-          git remote remove origin
+          git init -q --bare "$RUNNER_TEMP/origin.git"
+          git remote set-url origin "$RUNNER_TEMP/origin.git"
           git update-ref -d refs/notes/amont-attest || true
           # `git notes add` writes an object and needs a committer identity;
           # a bare runner has none.
@@ -127,6 +130,8 @@ jobs:
             echo "expected [], got: ${{ steps.bare.outputs.gates }}"; exit 1; }
           [ -z "${{ steps.bare.outputs.covered }}" ] || {
             echo "expected empty covered"; exit 1; }
+          [ '${{ steps.bare.outputs.notes }}' = absent ] || {
+            echo 'expected notes=absent, got ${{ steps.bare.outputs.notes }}'; exit 1; }
 
       # 2. Mint a real attestation over the tree this job checked out, and
       #    prove the action finds, verifies and reports it.
@@ -142,6 +147,7 @@ jobs:
           ssh-keygen -Y sign -n amont-attest -f "$RUNNER_TEMP/k" "$RUNNER_TEMP/p"
           git notes --ref amont-attest add -f \
             -m "$(printf '%s\n\n%s' "$(cat "$RUNNER_TEMP/p")" "$(cat "$RUNNER_TEMP/p.sig")")" "$tree"
+          git push -q -f origin refs/notes/amont-attest:refs/notes/amont-attest
       - id: signed
         uses: ./
         with:
@@ -189,26 +195,37 @@ jobs:
           gates: ci-lint-only
           platform: aarch64-macos
           push: false
-      - name: the block was appended locally
+      - name: the block was appended locally, beside origin's mirror
         run: |
           set -eu
           [ '${{ steps.appended.outputs.status }}' = local ] || { echo 'status: ${{ steps.appended.outputs.status }}'; exit 1; }
-          n=$(git notes --ref amont-attest show "$(git rev-parse 'HEAD^{tree}')" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
-          [ "$n" = 2 ] || { echo "expected 2 blocks, got $n"; exit 1; }
+          tree=$(git rev-parse 'HEAD^{tree}')
+          n=$(git notes --ref attest-local/amont-attest show "$tree" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
+          [ "$n" = 1 ] || { echo "expected 1 unpushed block, got $n"; exit 1; }
+          n=$(git notes --ref amont-attest show "$tree" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
+          [ "$n" = 1 ] || { echo "expected 1 block in the mirror, got $n"; exit 1; }
       - id: strict
         uses: ./
         with:
           signers: ${{ runner.temp }}/ci-signers
+          include-local: true
       - id: loose
         uses: ./
         with:
           signers: ${{ runner.temp }}/ci-signers
           anywhere: ci-lint-only
+          include-local: true
       - id: osonly
         uses: ./
         with:
           signers: ${{ runner.temp }}/ci-signers
           platform: macos
+          include-local: true
+      - id: nolocal
+        uses: ./
+        with:
+          signers: ${{ runner.temp }}/ci-signers
+          anywhere: ci-lint-only
       - name: strict, anywhere and os-only read the two blocks as specified
         run: |
           set -eu
@@ -218,6 +235,11 @@ jobs:
             echo 'anywhere: ${{ steps.loose.outputs.gates }}'; exit 1; }
           [ '${{ steps.osonly.outputs.gates }}' = '["ci-lint-only"]' ] || {
             echo 'os-only: ${{ steps.osonly.outputs.gates }}'; exit 1; }
+          # Without include-local the unpushed block is not read at all.
+          [ '${{ steps.nolocal.outputs.gates }}' = '["pre-push-cargo-test","pre-push-clippy"]' ] || {
+            echo 'no include-local: ${{ steps.nolocal.outputs.gates }}'; exit 1; }
+          [ '${{ steps.nolocal.outputs.notes }}' = fetched ] || {
+            echo 'notes: ${{ steps.nolocal.outputs.notes }}'; exit 1; }
 
       # 5. Input fingerprints, with the real producer. Sign ci-fmt on this
       #    tree with the local key, move the tree with a commit that touches
@@ -227,7 +249,7 @@ jobs:
       - id: readkey2
         run: |
           set -eu
-          git notes --ref amont-attest remove "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true
+          git notes --ref attest-local/amont-attest remove "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true
           {
             echo 'key<<ATTEST_EOF'
             cat "$RUNNER_TEMP/k"
@@ -243,12 +265,13 @@ jobs:
         run: |
           set -eu
           [ '${{ steps.fpsign.outputs.inputs }}' = 1/1 ] || { echo 'inputs: ${{ steps.fpsign.outputs.inputs }}'; exit 1; }
-          git notes --ref amont-attest show "$(git rev-parse 'HEAD^{tree}')" | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
+          git notes --ref attest-local/amont-attest show "$(git rev-parse 'HEAD^{tree}')" | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
           echo unrelated > UNRELATED.md && git add UNRELATED.md && git commit -qm unrelated
       - id: fpmoved
         uses: ./
         with:
           signers: ${{ runner.temp }}/ci-signers
+          include-local: true
       - name: an unrelated commit keeps the gate covered, by fingerprint
         run: |
           set -eu
@@ -258,6 +281,7 @@ jobs:
         uses: ./
         with:
           signers: ${{ runner.temp }}/ci-signers
+          include-local: true
       - name: a commit to a declared input does not
         run: |
           set -eu
@@ -265,7 +289,7 @@ jobs:
           # Back to the original tree, and without the fingerprint-keyed
           # block: the steps below reason about the tree key alone.
           git reset -q --hard HEAD~2
-          git update-ref -d refs/notes/amont-attest-inputs
+          git update-ref -d refs/notes/attest-local/amont-attest-inputs
 
       # 6. The substring bug this project exists to fix. `pre-push-cargo-test`
       #    is a substring of the covered `…-slow`, so the old string form would
@@ -279,6 +303,7 @@ jobs:
           ssh-keygen -Y sign -n amont-attest -f "$RUNNER_TEMP/k" "$RUNNER_TEMP/p2"
           git notes --ref amont-attest add -f \
             -m "$(printf '%s\n\n%s' "$(cat "$RUNNER_TEMP/p2")" "$(cat "$RUNNER_TEMP/p2.sig")")" "$tree"
+          git push -q -f origin refs/notes/amont-attest:refs/notes/amont-attest
       - id: collide
         uses: ./
         with:
