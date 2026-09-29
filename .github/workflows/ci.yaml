@@ -6,13 +6,20 @@ on:
   pull_request:
   schedule:
     - cron: "0 6 * * 1" # the pinned toolchain means a red build is attributable
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 # This repository eats its own cooking: every job that runs gates verifies
 # first and signs last, so the push to main after a merge, and every re-run,
-# skips what the pull request already proved. `contents: write` on those jobs
+# skips what the pull request already proved.
+#
+# Except on `schedule` and `workflow_dispatch`, which exist to catch what no
+# fingerprint binds — a new runner image, shellcheck, git, ssh-keygen — and
+# so must never skip. The attest step does not run there; its output is then
+# empty, which `|| '[]'` turns into "nothing covered" (fromJSON('') would
+# fail the job). `contents: write` on those jobs
 # is for pushing refs/notes/amont-attest and nothing else; a fork PR gets no
 # secret and a read-only token, and the sign step reports and succeeds.
 jobs:
@@ -24,20 +31,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: attest
+        if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
         uses: ./
         with:
           # fmt and shellcheck read text; clippy compiles under cfg and is
           # NOT portable, so it stays on the strict platform match.
           anywhere: ci-fmt ci-shellcheck
       - id: fmt
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-fmt') }}
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-fmt') }}
         run: cargo fmt --all -- --check
       - id: clippy
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-clippy') }}
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-clippy') }}
         run: cargo clippy --all-targets -- -D warnings
       - id: shellcheck
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-shellcheck') }}
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-shellcheck') }}
         run: shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git tests/fake/* scripts/*.sh
+      # Never behind an attest skip: cheap, and a drift they catch would
+      # otherwise ride on a fingerprint that does not name them.
+      - name: every flag is in its --help
+        run: ./scripts/help-lists-every-flag.sh
+      - name: the three platform tables are identical
+        run: ./scripts/platform-tables-match.sh
       - uses: ./sign
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
@@ -69,13 +83,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: attest
+        if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
         uses: ./
       - id: test
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-cargo-test') }}
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'pre-push-cargo-test') }}
         run: cargo test
         shell: bash
       - id: conformance
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'ci-conformance') }}
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-conformance') }}
         run: make conformance sign-test
         shell: bash
       - uses: ./sign
