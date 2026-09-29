@@ -179,7 +179,9 @@ fi
 # or hangs on a dead host has broken "exit 0, always" as surely as a crash.
 remote_git() {
     local ssh_cmd=${GIT_SSH_COMMAND:-}
-    if [ -z "$ssh_cmd" ] && ! git config --get core.sshCommand > /dev/null 2>&1; then
+    # The user's own ssh (GIT_SSH_COMMAND, GIT_SSH or core.sshCommand) is
+    # left alone: replacing it could drop the key selection it exists for.
+    if [ -z "$ssh_cmd" ] && [ -z "${GIT_SSH:-}" ] && ! git config --get core.sshCommand > /dev/null 2>&1; then
         ssh_cmd='ssh -o BatchMode=yes -o ConnectTimeout=10'
     fi
     # Each call gets a deadline of its own: curl's low-speed limit starts only
@@ -264,7 +266,7 @@ say_state "$NOTES_REF" "$st_main"
 say_state "$INPUTS_REF" "$st_inputs"
 if [ -z "$include_local" ]; then
     for r in "$NOTES_REF" "$INPUTS_REF"; do
-        git rev-parse --verify --quiet "refs/notes/attest-local/$r" > /dev/null 2>&1 &&
+        [ -n "$(git notes --ref "attest-local/$r" list 2> /dev/null | head -1)" ] &&
             note "refs/notes/attest-local/$r holds unpushed blocks, ignored without --include-local"
     done
 fi

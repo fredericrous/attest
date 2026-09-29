@@ -112,7 +112,11 @@ pub fn remote(args: &[&str]) -> Option<(i32, String)> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some_and(|v| !v.is_empty())
+    // The user's own ssh (GIT_SSH_COMMAND, GIT_SSH or core.sshCommand) is
+    // left alone: replacing it could drop the key selection it exists for.
+    let set = |v: &str| std::env::var_os(v).is_some_and(|v| !v.is_empty());
+    let own_ssh = set("GIT_SSH_COMMAND")
+        || set("GIT_SSH")
         || succeeds(&["config", "--get", "core.sshCommand"]);
     if !own_ssh {
         cmd.env(

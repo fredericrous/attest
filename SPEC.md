@@ -353,10 +353,13 @@ Exit 0 lists the refs that exist (an unlisted one is absent; the listed ones
 are fetched once more, and a failure there is `unreachable`); exit 2 means
 neither exists; anything else is `unreachable` for both. Every remote call
 runs with prompts off (`GIT_TERMINAL_PROMPT=0`, stdin closed, ssh in batch
-mode with a 10 s connect timeout unless the user configured an ssh command),
-curl's low-speed limit of 10 s, and a 15 s deadline of the verifier's own: a
-verifier that waits for a password or a dead host has broken "exit 0" as
-surely as a crash.
+mode with a 10 s connect timeout unless the user configured an ssh command
+through `GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand`), curl's low-speed
+limit of 10 s, and a 15 s deadline of the verifier's own: a verifier that
+waits for a password or a dead host has broken "exit 0" as surely as a
+crash. A dead origin therefore costs two calls, at most 30 s; the worst
+case, an origin that answers `ls-remote` but stalls the second fetch, three
+calls, at most 45 s.
 
 **Unpushed blocks** — written by a producer that did not push, such as
 `sign.sh --no-push` — live in `refs/notes/attest-local/amont-attest` and

@@ -608,7 +608,9 @@ fp=$(fp_of "$R" test)
 attach_input "$R" "$(payload_for "$R" 'te\163t' "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
 move_tree "$R"
 check "fp: an escaped gate name never resolves to a declared one" "" "$R"
-# Nor a 65-character name, even one the block claims a fingerprint for.
+# Nor a 65-character name, even one the block claims a fingerprint for. A
+# regression guard, not a reproduction: 1.3.1 found no declared gate by that
+# name either; this pins that the grammar check keeps it that way.
 fp_repo
 long=$(printf 'a%.0s' $(seq 65))
 fp=$(fp_of "$R" test)

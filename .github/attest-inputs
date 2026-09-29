@@ -4,8 +4,10 @@
 # which is not a wildcard: `?clippy.toml` names a path that may be absent and
 # whose appearance must re-run the gate. The sign step lists the absent ones
 # on one line of its log; a typo shows up there. This file is ASCII-only and
-# is itself an input of every gate; editing it re-runs everything once. The workflow is in every line on purpose: a gate name is
-# only worth the command behind it, and that command is defined there.
+# is itself an input of every gate; editing it re-runs everything once.
+#
+# The workflow is in every line on purpose: a gate name is only worth the
+# command behind it, and that command is defined there.
 #
 # The cargo gates name `tests` (cargo discovers tests/*.rs by itself, and
 # --all-targets / fmt --all read them) and the paths cargo, rustfmt and clippy

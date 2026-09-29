@@ -300,10 +300,13 @@ fingerprint() {
     [ -n "$paths" ] || return 1
     plain=$(plain_paths "$paths")
     # Required paths must resolve; an optional one may be absent, and its
-    # absence is recorded for the summary line below.
+    # absence is noted for the summary line below once this gate has a
+    # fingerprint. ls-tree, not cat-file -e: a gitlink whose commit is not in
+    # this repository is present all the same.
+    local absent=
     for tok in $paths; do
         case $tok in
-            \?*) git cat-file -e "$object_tree:${tok#?}" 2> /dev/null || printf '%s\n' "${tok#?}" >> "$tmp/absent" ;;
+            \?*) [ -n "$(git ls-tree "$object_tree" -- "${tok#?}" 2> /dev/null)" ] || absent="$absent ${tok#?}" ;;
         esac
     done
     # shellcheck disable=SC2046  # declared paths never contain blanks (the grammar refuses them)
@@ -317,7 +320,8 @@ fingerprint() {
         $plain
     git ls-tree -r -z --full-tree "$object_tree" -- "$@" > "$tmp/listing" 2> /dev/null; listing_rc=$?
     [ "$listing_rc" -eq 0 ] && [ -s "$tmp/listing" ] || return 1
-    git hash-object --stdin < "$tmp/listing" 2> /dev/null
+    git hash-object --stdin < "$tmp/listing" 2> /dev/null || return 1
+    for tok in $absent; do printf '%s\n' "$tok" >> "$tmp/absent"; done
 }
 
 # `gate<TAB>fp` per signed gate the spec declares, in spec order, into
