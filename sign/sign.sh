@@ -260,7 +260,12 @@ load_spec() {
             if (NF - 1 > 64) bad("gate `" g "` declares more than 64 paths")
             line = g
             for (i = 2; i <= NF; i++) {
-                t = $i
+                # One leading `?` marks a path that may be absent: its absence
+                # is then part of the fingerprint. The rest obeys every rule
+                # below, so `??x` and `?/x` fail them; a lone `?` is tested
+                # here because split("") yields no component to test.
+                t = $i; opt = ""
+                if (substr(t, 1, 1) == "?") { opt = "?"; t = substr(t, 2); if (t == "") bad("path `?` names nothing") }
                 if (substr(t, 1, 1) == ":") bad("path `" t "` starts with `:` (pathspec magic is not allowed)")
                 if (substr(t, 1, 1) == "/") bad("path `" t "` is absolute; paths are relative to the repository root")
                 if (substr(t, 1, 2) == "./" || substr(t, 1, 3) == "../") bad("path `" t "` starts with `./` or `../`")
@@ -268,7 +273,7 @@ load_spec() {
                 if (t ~ /[*?\[\]\\]/) bad("path `" t "` contains a wildcard; git ls-tree does not glob, only literal paths are accepted")
                 m = split(t, c, "/")
                 for (j = 1; j <= m; j++) if (c[j] == "" || c[j] == "." || c[j] == "..") bad("path `" t "` has an empty, `.` or `..` component")
-                line = line (i == 2 ? "\t" : " ") t
+                line = line (i == 2 ? "\t" : " ") opt t
             }
             print line
             if (++gates > 64) bad("declares more than 64 gates")
@@ -280,23 +285,36 @@ load_spec() {
 }
 load_spec
 
+# A gate's declared paths, as stored: `?p` marks a path that may be absent.
+# plain_paths strips the marker; required_paths keeps only the unmarked ones.
+plain_paths() { printf '%s\n' "$1" | awk '{ o = ""; for (i = 1; i <= NF; i++) { t = $i; sub(/^[?]/, "", t); o = o (i > 1 ? " " : "") t } print o }'; }
+required_paths() { printf '%s\n' "$1" | awk '{ o = ""; for (i = 1; i <= NF; i++) if (substr($i, 1, 1) != "?") o = o (o == "" ? "" : " ") $i; print o }'; }
+
 # The fingerprint of gate $1 on the signed tree, or nothing: the same
 # listing, the same implicit paths, the same refusal to hash a listing that
 # ended early as verify.sh's fp_head.
 fingerprint() {
-    local g=$1 paths tok listing_rc
+    local g=$1 paths plain tok listing_rc
     # ENVIRON, not -v: awk processes backslash escapes in a -v value.
     paths=$(ATTEST_G=$g awk -F '\t' '$1 == ENVIRON["ATTEST_G"] { print $2; exit }' "$tmp/spec.gates")
     [ -n "$paths" ] || return 1
-    # shellcheck disable=SC2086  # declared paths never contain blanks (the grammar refuses them)
-    set -- $paths
+    plain=$(plain_paths "$paths")
+    # Required paths must resolve; an optional one may be absent, and its
+    # absence is recorded for the summary line below.
+    for tok in $paths; do
+        case $tok in
+            \?*) git cat-file -e "$object_tree:${tok#?}" 2> /dev/null || printf '%s\n' "${tok#?}" >> "$tmp/absent" ;;
+        esac
+    done
+    # shellcheck disable=SC2046  # declared paths never contain blanks (the grammar refuses them)
+    set -- $(required_paths "$paths")
     for tok in "$@"; do printf '%s:%s\n' "$object_tree" "$tok"; done \
         | git cat-file --batch-check 2> /dev/null \
         | awk -v want="$#" '/ missing$/ { m = 1 } { n++ } END { exit (m || n != want) }' || return 1
     # shellcheck disable=SC2046,SC2086  # same: blank-free tokens, deliberately split
     set -- .forgejo/attest-inputs .github/attest-inputs .gitmodules \
-        $(for tok in $paths; do printf '.gitattributes\n'; d=${tok%/*}; while [ "$d" != "$tok" ]; do printf '%s/.gitattributes\n' "$d"; tok=$d; d=${tok%/*}; done; done | sort -u) \
-        $paths
+        $(for tok in $plain; do printf '.gitattributes\n'; d=${tok%/*}; while [ "$d" != "$tok" ]; do printf '%s/.gitattributes\n' "$d"; tok=$d; d=${tok%/*}; done; done | sort -u) \
+        $plain
     git ls-tree -r -z --full-tree "$object_tree" -- "$@" > "$tmp/listing" 2> /dev/null; listing_rc=$?
     [ "$listing_rc" -eq 0 ] && [ -s "$tmp/listing" ] || return 1
     git hash-object --stdin < "$tmp/listing" 2> /dev/null
@@ -317,6 +335,11 @@ if [ -n "$spec_ok" ]; then
     done < "$tmp/spec.gates"
 fi
 inputs_wanted=$(wc -l < "$tmp/fps" | tr -d ' ')
+# One line, not one per gate: short enough that a typo like `?biuld.rs`
+# stands out among the paths that are legitimately absent.
+if [ -s "$tmp/absent" ]; then
+    say "optional paths absent (their absence is bound): $(sort -u "$tmp/absent" | tr '\n' ' ' | sed 's/ $//')"
+fi
 
 # The payload, in the exact shape SPEC.md gives — the `input` lines after
 # `platform`, before `amont`, in spec order, so a re-run is byte-identical —

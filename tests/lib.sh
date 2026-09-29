@@ -224,6 +224,8 @@ fp_of() { # dir gate [tree]
         [ -n "$paths" ] && break
     done
     [ -n "$paths" ] || return 1
+    # The optional marker is not part of the path.
+    paths=$(printf '%s\n' "$paths" | awk '{ o = ""; for (i = 1; i <= NF; i++) { t = $i; sub(/^[?]/, "", t); o = o (i > 1 ? " " : "") t } print o }')
     # shellcheck disable=SC2046,SC2086
     set -- .forgejo/attest-inputs .github/attest-inputs .gitmodules \
         $(for tok in $paths; do printf '.gitattributes\n'; d=${tok%/*}; while [ "$d" != "$tok" ]; do printf '%s/.gitattributes\n' "$d"; tok=$d; d=${tok%/*}; done; done | sort -u) \
