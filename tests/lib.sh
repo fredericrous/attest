@@ -92,6 +92,24 @@ raw_note() { # dir content [target]
     git -C "$dir" notes --ref amont-attest add -f -C "$blob" "$target" 2> /dev/null
 }
 
+# Arbitrary bytes as the note on `target` (default the HEAD tree) in any
+# notes ref, verbatim.
+note_in() { # ref dir content [target]
+    local ref=$1 dir=$2 content=$3 target=${4:-} blob
+    [ -n "$target" ] || target=$(git -C "$dir" rev-parse 'HEAD^{tree}')
+    blob=$(printf '%s' "$content" | git -C "$dir" hash-object -w --stdin --no-filters)
+    git -C "$dir" notes --ref "$ref" add -f -C "$blob" "$target" 2> /dev/null
+}
+
+# The implementation with its reasons on stderr: verify.sh without --quiet,
+# git-attest `explain` instead of `covered`.
+explain_impl() {
+    case "$IMPL" in
+        *verify.sh*) printf '%s' "$IMPL" | sed 's/ --quiet//' ;;
+        *) printf '%s' "$IMPL" | sed 's/ covered$/ explain/' ;;
+    esac
+}
+
 # Run $IMPL in `dir` with the flags; stdout normalised to single spaces.
 run_impl() { # dir [flags...]
     local dir=$1; shift

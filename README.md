@@ -175,7 +175,16 @@ Then the trailing step shown at the top, with three rules that keep it honest:
   `.github/workflows/` can make CI sign anything.
 
 Fork pull requests get no secret and a read-only token; both paths just report
-and succeed. A tree your laptop already attested gets CI's block **appended**
+and succeed. With `push: false` the block stays on the runner, in
+`refs/notes/attest-local/amont-attest`, and the verifier reads it only with
+`include-local: true`: origin never saw it, so origin cannot revoke it.
+
+**Origin is the source of truth.** The verifier treats the local notes refs as
+a mirror of origin's: deleting them there revokes every attestation they held
+(1.4.0 clones delete their copy on the next run, and print how to restore
+it), and an origin that cannot be reached covers nothing — the action's
+`notes` output says `unreachable` and the job log warns. See SPEC.md, "Which
+refs are read". A tree your laptop already attested gets CI's block **appended**
 beside yours, each on its own platform. ed25519 keys only. `sign@v1` resolves
 only from 1.2.0 on.
 

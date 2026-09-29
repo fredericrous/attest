@@ -12,7 +12,8 @@ const USAGE: &str = "\
 git-attest — what a signed attestation covers for the tree checked out here
 
   git-attest covered [--signers PATH] [--principal ID] [--platform P|OS|any]
-                     [--anywhere \"NAMES\"] [--json | --github-output]
+                     [--anywhere \"NAMES\"] [--include-local]
+                     [--json | --github-output]
   git-attest explain [same flags]
 
   covered   print the covered gate names, or nothing. Always exits 0: every
@@ -35,12 +36,18 @@ git-attest — what a signed attestation covers for the tree checked out here
                     (formatting, shell lint, secret scanning, dependency
                     audit): a verified attestation from any platform covers
                     them. Never a check that compiles or executes the product.
+  --include-local   also read refs/notes/attest-local/*: blocks signed with
+                    `sign.sh --no-push` that never reached origin, so origin
+                    cannot revoke them. Off by default.
   --json            print a JSON array instead of a space-separated list
-                    A committed .github/attest-inputs (or .forgejo/) names the
-                    paths each gate reads; a gate is then also covered by an
-                    attestation of any tree whose declared inputs are identical.
-  --github-output   print `covered=` and `gates=` lines ready to append to
-                    $GITHUB_OUTPUT
+  --github-output   print `covered=`, `gates=`, `notes=` and `inputs_notes=`
+                    lines ready to append to $GITHUB_OUTPUT
+
+  A committed .github/attest-inputs (or .forgejo/) names the paths each gate
+  reads; a gate is then also covered by an attestation of any tree whose
+  declared inputs are identical. refs/notes/amont-attest[-inputs] are
+  origin's mirror: fetched, deleted when origin no longer has them, and not
+  read when origin is configured but cannot be reached.
 ";
 
 #[derive(Default, Debug, PartialEq)]
@@ -49,6 +56,7 @@ struct Opts {
     principal: Option<String>,
     platform: Option<String>,
     anywhere: Vec<String>,
+    include_local: bool,
     json: bool,
     gha: bool,
 }
@@ -64,6 +72,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         match args[i].as_str() {
             "--json" => o.json = true,
             "--github-output" => o.gha = true,
+            "--include-local" => o.include_local = true,
             name @ ("--signers" | "--principal" | "--platform" | "--anywhere") => {
                 let value = args
                     .get(i + 1)
@@ -147,6 +156,7 @@ fn run(args: &[String]) -> u8 {
         principal,
         platform,
         anywhere,
+        include_local,
         json,
         gha,
     } = match parse(&args[1..]) {
@@ -161,10 +171,21 @@ fn run(args: &[String]) -> u8 {
     // Every early return below is "nothing is covered", printed the same way
     // the covered path prints its answer — so a caller that always parses the
     // output never meets a special case.
-    let done = |gates: Vec<String>, trail: Vec<String>| -> u8 {
+    let done = |verdict: attest::Verdict| -> u8 {
+        let attest::Verdict {
+            gates,
+            trail,
+            notes,
+            loud,
+        } = verdict;
+        // A change to the repository's refs is always reported, `explain` or
+        // not: data went away, and the line says how to bring it back.
+        for line in &loud {
+            eprintln!("attest: {line}");
+        }
         if explain {
             for step in &trail {
-                eprintln!("  {step}");
+                eprintln!("attest: {step}");
             }
         }
         if gha {
@@ -173,6 +194,9 @@ fn run(args: &[String]) -> u8 {
             // that matches element-wise and is the one to use.
             println!("covered={}", gates.join(" "));
             println!("gates={}", as_json(&gates));
+            let (m, i) = notes.map_or(("", ""), |(m, i)| (m.as_str(), i.as_str()));
+            println!("notes={m}");
+            println!("inputs_notes={i}");
         } else if json {
             println!("{}", as_json(&gates));
         } else if !gates.is_empty() {
@@ -186,10 +210,14 @@ fn run(args: &[String]) -> u8 {
         .map(attest::resolve_signers)
         .or_else(attest::default_signers)
     else {
-        return done(
-            Vec::new(),
-            vec!["no allowed_signers found (.forgejo/ or .github/) at the repository root".into()],
-        );
+        return done(attest::Verdict {
+            gates: Vec::new(),
+            trail: vec![
+                "no allowed_signers found (.forgejo/ or .github/) at the repository root".into(),
+            ],
+            notes: None,
+            loud: Vec::new(),
+        });
     };
 
     // `any` is the deliberate, committed statement that a suite's result does
@@ -202,8 +230,13 @@ fn run(args: &[String]) -> u8 {
         None => Some(attest::platform()),
     };
 
-    let verdict = attest::evaluate(&signers, principal.as_deref(), want.as_deref(), &anywhere);
-    done(verdict.gates, verdict.trail)
+    done(attest::evaluate(
+        &signers,
+        principal.as_deref(),
+        want.as_deref(),
+        &anywhere,
+        include_local,
+    ))
 }
 
 #[cfg(test)]
@@ -276,6 +309,18 @@ mod tests {
             Err("unknown argument --quiet".into())
         );
         assert_eq!(parse(&[]), Ok(Opts::default()));
+    }
+
+    /// A switch, not a value: it must neither swallow the next argument nor
+    /// be mistaken for one.
+    #[test]
+    fn include_local_is_a_switch() {
+        let o = parse(&argv(&["--include-local", "--json"])).unwrap();
+        assert!(o.include_local && o.json);
+        let o = parse(&argv(&["--signers", "p", "--include-local"])).unwrap();
+        assert_eq!(o.signers.as_deref(), Some("p"));
+        assert!(o.include_local);
+        assert!(!parse(&[]).unwrap().include_local);
     }
 
     #[test]

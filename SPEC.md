@@ -303,12 +303,51 @@ keeps its invariant that every key is a real object.
 
 **Lookup.** Candidates are `HEAD^{tree}`, `HEAD`, `HEAD^2` in the main ref,
 then — lazily, only for gates the spec declares and nothing above covered —
-`K(g, fp)` in the inputs ref. Every block found anywhere is judged by the
+`K(g, fp)` in the inputs ref. For each candidate, in that order, the refs
+are read in the order "Which refs are read" gives: origin's mirror, then the
+unpushed blocks when asked. Every block found anywhere is judged by the
 same rules; a block's verdict depends only on its content and the checked-out
 tree, so a block already judged is skipped wherever it appears again (by its
 exact bytes; a note already read is skipped by its oid). A verifier verifies
 at most 64 signatures per invocation over all candidates — one verification
 being one call of its verify routine — and says so when the budget is spent.
+Because the budget is shared, the visit order is part of the contract.
+
+### Which refs are read
+
+Origin is the only place an attestation can be revoked — by deleting or
+rewriting its notes refs — so a verifier treats
+`refs/notes/amont-attest` and `refs/notes/amont-attest-inputs` in the
+repository it runs in as **origin's mirror**, never as a store of its own
+(1.4.0). It fetches both refs in one call, and:
+
+| outcome | `notes=` | the local ref |
+|---|---|---|
+| the fetch succeeded | `fetched` | is origin's ref, and is judged |
+| origin answered and has no such ref | `absent` | is **deleted**, with a line saying how to restore it; nothing judged |
+| as above, but the delete failed (a read-only `.git`) | `undeletable` | is not judged |
+| origin is configured and did not answer | `unreachable` | is **not judged**: a stale mirror on a persistent runner must not outlive a revocation |
+| there is no remote named `origin` | `no-origin` | is judged as it is — for fixtures and local use; CI always has an origin |
+
+"Did not answer" is decided with at most two remote calls: the fetch of both
+refs and, when it fails, one `git ls-remote --exit-code origin` naming both.
+Exit 0 lists the refs that exist (an unlisted one is absent; the listed ones
+are fetched once more, and a failure there is `unreachable`); exit 2 means
+neither exists; anything else is `unreachable` for both. Every remote call
+runs with prompts off (`GIT_TERMINAL_PROMPT=0`, stdin closed, ssh in batch
+mode with a 10 s connect timeout unless the user configured an ssh command),
+curl's low-speed limit of 10 s, and a 15 s deadline of the verifier's own: a
+verifier that waits for a password or a dead host has broken "exit 0" as
+surely as a crash.
+
+**Unpushed blocks** — written by a producer that did not push, such as
+`sign.sh --no-push` — live in `refs/notes/attest-local/amont-attest` and
+`refs/notes/attest-local/amont-attest-inputs`. Origin never saw them and
+cannot revoke them, so a verifier reads them **only when asked**
+(`--include-local`), after the mirror, whether or not the mirror was judged,
+and names them `(unpushed)` in its reasons. `git update-ref -d
+refs/notes/attest-local/…` discards them. A blanket `git push origin
+'refs/notes/*'` would publish them; push the two refs by name instead.
 
 **Compatibility.** `input` lines are additive; the format token stays
 `amont-attest-v2`. A 1.1.0 or 1.2.0 verifier reads a block that carries
@@ -327,8 +366,8 @@ the spec from the tree — the inconsistency is noted rather than deepened.)
 ### Fail-open is the contract
 
 Every failure — no note, no signers file, no `ssh-keygen`, a tree that moved, a
-signature that does not verify, an unknown format version — means **not
-covered**, which means the caller runs its tests. A verifier must **exit 0**
+signature that does not verify, an unknown format version, an origin that did
+not answer — means **not covered**, which means the caller runs its tests. A verifier must **exit 0**
 regardless.
 
 This is deliberate and it is the whole safety argument: nothing in this format
@@ -378,7 +417,10 @@ producer for CI. What a producer owes this format:
   refs independently, and on a later run repair whichever keys are missing
   the block. An invalid spec degrades to the object-keyed block.
 - **Append, never replace.** Write the block with `git notes append`; `git
-  notes add -f` erases every other producer's block on that tree. Keep the
+  notes add -f` erases every other producer's block on that tree. Build what
+  you push from origin's current ref plus your block, never from the local
+  ref: that would re-publish a block origin revoked. A block you do not push
+  goes to `refs/notes/attest-local/…`, not to the mirror. Keep the
   `amont <version>` line stable across runs — no run id, no timestamp — so a
   re-run recognises its own block as already present instead of appending it
   again. Use an ed25519 key: its signatures are deterministic, which is what

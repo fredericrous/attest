@@ -8,8 +8,9 @@ help: ## show this help
 lint: ## rustfmt + clippy + shellcheck
 	cargo fmt --all -- --check
 	cargo clippy --all-targets -- -D warnings
+	@./scripts/help-lists-every-flag.sh
 	@if command -v shellcheck > /dev/null; then \
-	    shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git; \
+	    shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git scripts/*.sh; \
 	  else \
 	    echo "  (shellcheck not installed — skipped)"; \
 	  fi
@@ -71,9 +72,12 @@ compat: ## prove released verifiers degrade safely on newer notes
 	@cargo build -q --release
 	@./tests/compat-fields.sh "$(PWD)/target/release/git-attest covered" new
 
-sign-test: ## the producer's fixtures (sign/sign.sh against a bare origin)
-	@echo "--- sign/sign.sh ---"
+sign-test: ## the producer's fixtures (sign/sign.sh against a bare origin), read back by both verifiers
+	cargo build --release
+	@echo "--- sign/sign.sh, read by verify.sh ---"
 	@./tests/sign.sh
+	@echo "--- sign/sign.sh, read by git-attest ---"
+	@ATTEST_IMPL="$(PWD)/target/release/git-attest covered" ./tests/sign.sh
 
 check: lint test conformance compat sign-test ## everything CI runs
 
