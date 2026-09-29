@@ -266,9 +266,10 @@ fn drop_mirror(loud: &mut Vec<String>, notes_ref: &str) -> Mirror {
     }
 }
 
-/// Bring both mirrors in line with origin, with at most two calls that can
-/// stall: one fetch of both refs and, when that fails, one `ls-remote` to
-/// tell "origin has no such ref" from "origin did not answer".
+/// Bring both mirrors in line with origin: one fetch of both refs and, when
+/// that fails, one `ls-remote` to tell "origin has no such ref" from "origin
+/// did not answer" — then, if some refs exist, one more fetch of those. A
+/// dead origin costs two calls (30 s at most), the worst case three (45 s).
 fn sync_mirrors(loud: &mut Vec<String>) -> (Mirror, Mirror) {
     if !git::succeeds(&["remote", "get-url", "origin"]) {
         return (Mirror::NoOrigin, Mirror::NoOrigin);
