@@ -502,11 +502,39 @@ else
     printf '  SKIP  a stalled http origin (no python here, or Windows)\n'
 fi
 
+case "$IMPL" in bash*) native= ;; *) native=1 ;; esac
+# A host that never answers at all — not even the connection curl's
+# low-speed limit waits on — is ended by the verifier's own 15 s deadline
+# per call: the fetch, then ls-remote, then nothing.
+if [ -n "$native" ] && [ "$OS" = windows ]; then
+    printf '  SKIP  a silent origin is cut off by the deadline (the faulty-git wrapper cannot reach a native binary on Windows)\n'
+else
+    make_remote_repo
+    mkdir -p "$WORK/fault"; tr -d '\r' < "$HERE/tests/fault/git" > "$WORK/fault/git"; chmod +x "$WORK/fault/git"
+    t0=$(date +%s)
+    got=$(ATTEST_REAL_GIT=$(command -v git) ATTEST_FAULT=hang PATH="$WORK/fault:$PATH" gha_in "$R")
+    t=$(( $(date +%s) - t0 ))
+    assert_eq "a silent origin is cut off by the deadline" "$got" "notes=unreachable inputs_notes=unreachable"
+    if [ "$t" -ge 25 ] && [ "$t" -le 40 ]; then ok "...after two 15 s deadlines (took ${t} s)"; else fail "...after two 15 s deadlines" "took ${t} s"; fi
+fi
+
+# The two implementations say the same thing, line for line, about an origin
+# that does not answer. ATTEST_GIT_ATTEST names the binary (Makefile sets it).
+if [ -n "${ATTEST_GIT_ATTEST:-}" ] && [ -x "$ATTEST_GIT_ATTEST" ]; then
+    make_remote_repo
+    sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
+    git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
+    sh_err=$(cd "$R" && bash "$VERIFY" 2>&1 > /dev/null < /dev/null)
+    rs_err=$(cd "$R" && "$ATTEST_GIT_ATTEST" explain 2>&1 > /dev/null < /dev/null)
+    assert_eq "both implementations' stderr is identical for an unreachable origin" "$rs_err" "$sh_err"
+else
+    printf '  SKIP  both implementations'"'"' stderr is identical (ATTEST_GIT_ATTEST not set)\n'
+fi
+
 # Never a prompt: every remote call runs with prompts off and ssh in batch
 # mode. The faulty-git wrapper records what fetch and ls-remote saw.
 make_remote_repo
 git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
-case "$IMPL" in bash*) native= ;; *) native=1 ;; esac
 if [ -n "$native" ] && [ "$OS" = windows ]; then
     printf '  SKIP  remote calls never prompt (the faulty-git wrapper cannot reach a native binary on Windows)\n'
 else

@@ -8,6 +8,8 @@
 #   cat-file  make `cat-file blob …` exit 1 (`-e` and --batch-check untouched)
 #   env       for `fetch` and `ls-remote`, append the GIT_TERMINAL_PROMPT and
 #             GIT_SSH_COMMAND they run with to ATTEST_FAULT_LOG, then run them
+#   hang      `fetch` and `ls-remote` never answer (a host that drops SYNs):
+#             only the verifier's own deadline can end them
 #
 # Both implementations spawn `git` from PATH, so one wrapper serves both.
 real=${ATTEST_REAL_GIT:?}
@@ -19,6 +21,9 @@ case "${ATTEST_FAULT:-}:$*" in
         exit 1 ;;
     cat-file:"cat-file blob "*|cat-file:*" cat-file blob "*)
         exit 1 ;;
+    hang:*" fetch "*|hang:*" ls-remote "*|hang:"fetch "*|hang:"ls-remote "*)
+        # exec: the killed pid IS the sleeper, so nothing lingers on a pipe.
+        exec sleep 120 ;;
     env:*" fetch "*|env:*" ls-remote "*|env:"fetch "*|env:"ls-remote "*)
         printf '%s|%s\n' "${GIT_TERMINAL_PROMPT-}" "${GIT_SSH_COMMAND-}" >> "${ATTEST_FAULT_LOG:?}" ;;
 esac

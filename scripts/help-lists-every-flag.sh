@@ -28,7 +28,8 @@ check() { # program help-text flags...
 check verify.sh "$(bash verify.sh --help)" $(shell_flags verify.sh)
 # shellcheck disable=SC2046
 check sign/sign.sh "$(bash sign/sign.sh --help < /dev/null)" $(shell_flags sign/sign.sh)
-if [ -x target/release/git-attest ] || cargo build -q --release; then
+# Always built: an existing binary may predate the parser being checked.
+if cargo build -q --release; then
     # shellcheck disable=SC2046
     check git-attest "$(target/release/git-attest --help)" $(rust_flags)
 else

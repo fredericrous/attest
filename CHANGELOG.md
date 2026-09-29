@@ -22,8 +22,8 @@ An audit of 1.3.1, applied.
 - **Optional paths in the input spec.** A leading `?` marks a path that may
   be absent — `?build.rs`, `?clippy.toml` — whose appearance must re-run the
   gate; it was unbindable before, since every declared path had to exist.
-  1.3.x readers reject the marker as a wildcard, so such a spec only loses
-  them fingerprint skips.
+  1.3.x readers reject the marker as a wildcard, so such a spec only costs
+  them their fingerprint skips.
 - **This repository's own spec under-declared its cargo gates**: `tests`,
   which cargo discovers by itself, was missing, so a new integration test
   could have ridden an old attestation. Fixed, with the optional tool files.
@@ -35,7 +35,9 @@ An audit of 1.3.1, applied.
 - **Revoking is documented** (SPEC.md, "Revoking"), including why tightening
   the spec alone does not retire old attestations.
 - **No prompts, no hangs.** Remote calls run with prompts off, ssh in batch
-  mode, curl's low-speed limit, and a 15 s deadline each.
+  mode (unless you configured your own ssh command), curl's low-speed limit,
+  and a 15 s deadline each: at most 30 s against a dead origin, 45 s in the
+  worst case.
 - **The signing key stays out of child environments.** The sign action set
   it as step environment, so git, ssh-keygen and any hook or credential
   helper inherited it; it is now unset before anything runs and reaches

@@ -1028,6 +1028,18 @@ pub fn evaluate(
         return Verdict::nothing(format!("{} does not exist", signers.display()));
     }
 
+    // The repository first, as verify.sh does: outside one there is nothing
+    // to sync, and `notes=` stays empty.
+    let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]).map(PathBuf::from) else {
+        push_reason(&mut trail, "not a git repository".into());
+        return Verdict {
+            gates: Vec::new(),
+            trail,
+            notes: None,
+            loud,
+        };
+    };
+
     let (st_main, st_inputs) = sync_mirrors(&mut loud);
     let notes = Some((st_main, st_inputs));
     for (r, st) in [(NOTES_REF, st_main), (INPUTS_REF, st_inputs)] {
@@ -1038,7 +1050,9 @@ pub fn evaluate(
     if !include_local {
         for r in [NOTES_REF, INPUTS_REF] {
             let local = format!("refs/notes/{LOCAL_PREFIX}{r}");
-            if git::succeeds(&["rev-parse", "--verify", "--quiet", &local]) {
+            // A ref that holds notes: `git notes remove` of the last one
+            // leaves the ref behind, and that is nothing to report.
+            if git::stdout(&["notes", "--ref", &format!("{LOCAL_PREFIX}{r}"), "list"]).is_some() {
                 push_reason(
                     &mut trail,
                     format!("{local} holds unpushed blocks, ignored without --include-local"),
@@ -1060,15 +1074,6 @@ pub fn evaluate(
     let refs_main = refs(NOTES_REF, st_main);
     let refs_inputs = refs(INPUTS_REF, st_inputs);
 
-    let Some(root) = git::stdout(&["rev-parse", "--show-toplevel"]).map(PathBuf::from) else {
-        push_reason(&mut trail, "not a git repository".into());
-        return Verdict {
-            gates: Vec::new(),
-            trail,
-            notes,
-            loud,
-        };
-    };
     let Some(head_tree) = git::stdout(&["rev-parse", "HEAD^{tree}"]) else {
         push_reason(
             &mut trail,
