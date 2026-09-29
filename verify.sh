@@ -216,7 +216,8 @@ drop_mirror() { # ref
 }
 
 sync_mirrors() {
-    local listing rc want
+    local listing rc
+    local -a want=()
     if ! git remote get-url origin > /dev/null 2>&1; then
         st_main=no-origin; st_inputs=no-origin; return
     fi
@@ -231,20 +232,19 @@ sync_mirrors() {
     listing=$(remote_git ls-remote --exit-code origin "refs/notes/$NOTES_REF" "refs/notes/$INPUTS_REF" 2> /dev/null); rc=$?
     case $rc in
         0)
-            want=
             if printf '%s\n' "$listing" | awk -v r="refs/notes/$NOTES_REF" '$2 == r { f = 1 } END { exit !f }'; then
-                want="$want +refs/notes/$NOTES_REF:refs/notes/$NOTES_REF"; st_main=fetched
+                want+=("+refs/notes/$NOTES_REF:refs/notes/$NOTES_REF"); st_main=fetched
             else
                 st_main=$(drop_mirror "$NOTES_REF")
             fi
             if printf '%s\n' "$listing" | awk -v r="refs/notes/$INPUTS_REF" '$2 == r { f = 1 } END { exit !f }'; then
-                want="$want +refs/notes/$INPUTS_REF:refs/notes/$INPUTS_REF"; st_inputs=fetched
+                want+=("+refs/notes/$INPUTS_REF:refs/notes/$INPUTS_REF"); st_inputs=fetched
             else
                 st_inputs=$(drop_mirror "$INPUTS_REF")
             fi
-            if [ -n "$want" ]; then
-                # shellcheck disable=SC2086  # refspecs, deliberately split
-                if ! remote_git fetch --quiet origin $want > /dev/null 2>&1; then
+            # A third call, only when origin answered: the refs it has.
+            if [ "${#want[@]}" -gt 0 ]; then
+                if ! remote_git fetch --quiet origin "${want[@]}" > /dev/null 2>&1; then
                     [ "$st_main" = fetched ] && st_main=unreachable
                     [ "$st_inputs" = fetched ] && st_inputs=unreachable
                 fi
