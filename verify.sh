@@ -310,7 +310,12 @@ sig_file=$tmp/sig
 # `gates` lines yields a multi-line value, which would break the caller's
 # `name=value` output format — the one place a malformed note could reach past
 # this script.
-field() { printf '%s\n' "$2" | awk -v k="$1" '$1 == k { sub(/^[^ ]* */, ""); print; exit }'; }
+#
+# Every value compared inside an awk program arrives through ENVIRON, never
+# `-v`: awk processes backslash escapes in a `-v` assignment, so a signed gate
+# called `te\163t` would compare equal to `test`. ENVIRON is POSIX, and BSD
+# awk, mawk and gawk all pass it through untouched.
+field() { printf '%s\n' "$2" | ATTEST_K=$1 awk '$1 == ENVIRON["ATTEST_K"] { sub(/^[^ ]* */, ""); print; exit }'; }
 
 # How many blocks of one note are read, and how many signatures one run
 # verifies over every candidate. Every block costs two ssh-keygen runs, and
@@ -461,7 +466,7 @@ load_spec() {
 load_spec
 
 # The paths of gate $1 per the spec, space-separated, or nothing.
-spec_paths() { awk -F '\t' -v g="$1" '$1 == g { print $2; exit }' "$tmp/spec.gates"; }
+spec_paths() { ATTEST_G=$1 awk -F '\t' '$1 == ENVIRON["ATTEST_G"] { print $2; exit }' "$tmp/spec.gates"; }
 
 # The fingerprint of gate $1 on HEAD's tree, memoised in "$tmp/fp.<gate>":
 # the oid, or an empty file when the gate has none here (not in the spec, a
@@ -505,12 +510,28 @@ fp_head() {
 # The fingerprint a block claims for gate $2 in payload $1: an `input <gate>
 # <fp>` line of exactly three fields, first occurrence wins.
 input_fp() {
-    printf '%s\n' "$1" | awk -v g="$2" \
-        'NF == 3 && $1 == "input" && $2 == g && $3 ~ /^[0-9a-f]+$/ && (length($3) == 40 || length($3) == 64) { print $3; exit }'
+    printf '%s\n' "$1" | ATTEST_G=$2 awk \
+        'NF == 3 && $1 == "input" && $2 == ENVIRON["ATTEST_G"] && $3 ~ /^[0-9a-f]+$/ && (length($3) == 40 || length($3) == 64) { print $3; exit }'
 }
 
 # The synthetic note key for (gate, fingerprint).
 input_key() { printf 'amont-attest-input %s %s\n' "$1" "$2" | git hash-object --stdin 2> /dev/null; }
+
+# Can gate $1 be covered by fingerprint at all? Only a name the spec grammar
+# allows, `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, because only such a name can be
+# declared there — and only such a name is safe in "$tmp/fp.$g". The classes
+# are spelled out under LC_ALL=C: a range like A-Z follows the locale's
+# collation in bash 3.2.
+fp_eligible() {
+    [ "${#1}" -ge 1 ] && [ "${#1}" -le 64 ] || return 1
+    (
+        LC_ALL=C
+        case $1 in
+            [!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]*) exit 1 ;;
+            *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) exit 1 ;;
+        esac
+    )
+}
 
 # The uniform rule, per gate: those names of $2 that the block covers, given
 # whether its tree is the checked-out one ($1) and its payload ($3).
@@ -520,6 +541,7 @@ kept_gates() {
         if [ "$tree_matches" = yes ]; then
             out=$(union "$out" "$g")
         else
+            fp_eligible "$g" || continue
             claimed=$(input_fp "$payload" "$g")
             [ -n "$claimed" ] || continue
             here=$(fp_head "$g")

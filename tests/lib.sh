@@ -188,7 +188,7 @@ fp_of() { # dir gate [tree]
     [ -n "$tree" ] || tree=$(git -C "$dir" rev-parse 'HEAD^{tree}')
     for where in .forgejo .github; do
         paths=$(git -C "$dir" cat-file blob "$tree:$where/attest-inputs" 2> /dev/null \
-            | awk -v g="$g" '$1 == g { $1 = ""; sub(/^ +/, ""); print; exit }')
+            | ATTEST_G=$g awk '$1 == ENVIRON["ATTEST_G"] { $1 = ""; sub(/^ +/, ""); print; exit }')
         [ -n "$paths" ] && break
     done
     [ -n "$paths" ] || return 1
