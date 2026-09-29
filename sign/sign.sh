@@ -264,7 +264,8 @@ load_spec
 # ended early as verify.sh's fp_head.
 fingerprint() {
     local g=$1 paths tok listing_rc
-    paths=$(awk -F '\t' -v g="$g" '$1 == g { print $2; exit }' "$tmp/spec.gates")
+    # ENVIRON, not -v: awk processes backslash escapes in a -v value.
+    paths=$(ATTEST_G=$g awk -F '\t' '$1 == ENVIRON["ATTEST_G"] { print $2; exit }' "$tmp/spec.gates")
     [ -n "$paths" ] || return 1
     # shellcheck disable=SC2086  # declared paths never contain blanks (the grammar refuses them)
     set -- $paths

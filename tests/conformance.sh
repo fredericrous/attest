@@ -534,6 +534,24 @@ check "order: candidate by candidate, mirror then unpushed" "" "$R" --include-lo
 note_in attest-local/amont-attest "$R" "$(strangers_in 33 63)"
 check "order: 63 verifications leave room for HEAD" "g1" "$R" --include-local
 
+# --- gate names are literal in the fingerprint route (1.4.0) -----------------
+# A signed gate `te\163t` claiming `test`'s fingerprint: awk's `-v` turned it
+# into `test` in 1.3.1's verify.sh, which then reported `te\163t` covered while
+# git-attest reported nothing. It is not a name the spec can declare, so it
+# has no fingerprint route at all.
+fp_repo
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" 'te\163t' "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: an escaped gate name never resolves to a declared one" "" "$R"
+# Nor a 65-character name, even one the block claims a fingerprint for.
+fp_repo
+long=$(printf 'a%.0s' $(seq 65))
+fp=$(fp_of "$R" test)
+attach_input "$R" "$(payload_for "$R" "$long test" "$PLATFORM" "" "test=$fp $long=$fp")" "$WORK/key" test "$fp"
+move_tree "$R"
+check "fp: a 65-character gate has no fingerprint route" "test" "$R"
+
 # --- gate names are literal, never globs ------------------------------------
 # A signed gate called `pre-push-*` next to a FILE called pre-push-cargo-test
 # must come out as `pre-push-*`, not as the file's name: word-splitting the
