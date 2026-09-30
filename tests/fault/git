@@ -10,7 +10,9 @@
 #             GIT_SSH_COMMAND they run with to ATTEST_FAULT_LOG, then run them
 #   hang      `fetch` and `ls-remote` never answer (a host that drops SYNs):
 #             only the verifier's own deadline can end them; each call is
-#             logged to ATTEST_FAULT_LOG when set
+#             logged to ATTEST_FAULT_LOG when set, and a fetch first takes
+#             the lock of every refspec destination, as a real fetch killed
+#             mid-write would leave it
 #
 # Both implementations spawn `git` from PATH, so one wrapper serves both.
 real=${ATTEST_REAL_GIT:?}
@@ -24,6 +26,12 @@ case "${ATTEST_FAULT:-}:$*" in
         exit 1 ;;
     hang:*" fetch "*|hang:*" ls-remote "*|hang:"fetch "*|hang:"ls-remote "*)
         [ -z "${ATTEST_FAULT_LOG:-}" ] || printf 'call\n' >> "$ATTEST_FAULT_LOG"
+        for a in "$@"; do
+            case $a in
+                +*:*) dst=${a#*:}; lock=$("$real" rev-parse --git-path "$dst.lock")
+                      mkdir -p "$(dirname "$lock")"; : > "$lock" ;;
+            esac
+        done
         # exec: the killed pid IS the sleeper, so nothing lingers on a pipe.
         exec sleep 120 ;;
     env:*" fetch "*|env:*" ls-remote "*|env:"fetch "*|env:"ls-remote "*)

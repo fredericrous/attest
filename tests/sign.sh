@@ -521,7 +521,9 @@ else
     assert_eq "a silent origin is cut off by the deadline" "$got" "notes=unreachable inputs_notes=unreachable"
     assert_eq "...after one remote call" "$(wc -l < "$WORK/calls" | tr -d ' ')" 1
     if [ "$t" -ge 12 ] && [ "$t" -le 25 ]; then ok "...after one 15 s deadline (took ${t} s)"; else fail "...after one 15 s deadline" "took ${t} s"; fi
-    if [ -e "$(git -C "$R" rev-parse --git-path refs/notes/amont-attest.lock)" ]; then
+    mlock=$(git -C "$R" rev-parse --git-path refs/notes/amont-attest.lock)
+    case $mlock in /*) ;; *) mlock=$R/$mlock ;; esac
+    if [ -e "$mlock" ]; then
         fail "...and leaves no lock on the mirror" "lock present"
     else
         ok "...and leaves no lock on the mirror"
@@ -580,6 +582,7 @@ assert_eq "a stale lock, origin rewritten: the stale copy is not judged" "$(gha_
 explain_in "$R"
 case $ERR in *"a git that was killed left a lock on refs/notes/amont-attest; if no git is running: rm "*) ok "...and the log says how to clear it" ;; *) fail "...and the log says how to clear it" "$ERR" ;; esac
 rm -f "$lock_abs"
+assert_eq "lock removed: origin's copy is the mirror again" "$(gha_in "$R")" "notes=fetched inputs_notes=absent"
 
 # Throwaway refs of runs killed before their cleanup are swept — only those
 # whose process is gone; a live one's stays. Not on Windows, where liveness

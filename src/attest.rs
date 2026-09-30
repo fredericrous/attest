@@ -354,6 +354,13 @@ fn sync_mirrors(loud: &mut Vec<String>) -> (Mirror, Mirror) {
     let full = |r: &str| format!("refs/notes/{r}");
     let tmp = |r: &str| format!("{TMP_NS}{pid}/{r}");
     let spec = |r: &str| format!("+{}:{}", full(r), tmp(r));
+    // Our own throwaways, and any lock a dead run with our pid left on them.
+    for r in [NOTES_REF, INPUTS_REF] {
+        let _ = git::succeeds(&["update-ref", "-d", &tmp(r)]);
+        if let Some(lock) = git::stdout(&["rev-parse", "--git-path", &format!("{}.lock", tmp(r))]) {
+            let _ = std::fs::remove_file(lock);
+        }
+    }
     let old_main = git::stdout(&["rev-parse", "--verify", "--quiet", &full(NOTES_REF)]);
     let old_inputs = git::stdout(&["rev-parse", "--verify", "--quiet", &full(INPUTS_REF)]);
     let adopt_both = || {
