@@ -1,7 +1,7 @@
 ---
 canonical: fredericrous/amont docs/plans/2026-09-30-amont-attest-parity.md
 phases: "attest 1.4.1: fetch into a throwaway ref, never prompt (change 4)"
-status: active
+status: done
 ---
 # amont + attest: 1.4.0 parity and remote-call hardening (pointer)
 
