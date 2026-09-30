@@ -119,6 +119,11 @@ pub enum Mirror {
     Undeletable,
     /// Origin is configured and did not answer: not judged.
     Unreachable,
+    /// As `Unreachable`, because the deadline cut the call off.
+    TimedOut,
+    /// Origin's copy was fetched but could not be made the local ref (a
+    /// stale lock, say): the stale local copy is not judged.
+    Unwritable,
 }
 
 impl Mirror {
@@ -128,7 +133,8 @@ impl Mirror {
             Mirror::NoOrigin => "no-origin",
             Mirror::Deleted => "absent",
             Mirror::Undeletable => "undeletable",
-            Mirror::Unreachable => "unreachable",
+            Mirror::Unreachable | Mirror::TimedOut => "unreachable",
+            Mirror::Unwritable => "unwritable",
         }
     }
     fn judged(self) -> bool {
@@ -266,56 +272,170 @@ fn drop_mirror(loud: &mut Vec<String>, notes_ref: &str) -> Mirror {
     }
 }
 
-/// Bring both mirrors in line with origin: one fetch of both refs and, when
-/// that fails, one `ls-remote` to tell "origin has no such ref" from "origin
-/// did not answer" — then, if some refs exist, one more fetch of those. A
-/// dead origin costs two calls (30 s at most), the worst case three (45 s).
+/// Where fetches land before they become the mirror: outside `refs/notes/`,
+/// one directory per process id, so no notes push or pruning fetch ever
+/// touches them.
+pub const TMP_NS: &str = "refs/attest-tmp/";
+
+/// Remove the throwaways of runs killed before their cleanup — only those
+/// whose process is gone, so a concurrent run in the same clone keeps its
+/// own. Where liveness cannot be asked, nothing is swept: a leftover outside
+/// `refs/notes/` is inert.
+fn sweep_tmp_refs() {
+    let Some(refs) = git::stdout(&["for-each-ref", "--format=%(refname)", TMP_NS]) else {
+        return;
+    };
+    let me = std::process::id().to_string();
+    for r in refs.lines() {
+        let Some(pid) = r
+            .strip_prefix(TMP_NS)
+            .and_then(|rest| rest.split('/').next())
+            .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        if pid != me && process_gone(pid) {
+            let _ = git::succeeds(&["update-ref", "-d", r]);
+        }
+    }
+}
+
+/// True only on a positive "no such process" (read in the C locale); any
+/// other answer, or none, counts as alive, so nothing live is swept.
+fn process_gone(pid: &str) -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
+    Command::new("kill")
+        .args(["-0", pid])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .is_ok_and(|o| {
+            !o.status.success()
+                && String::from_utf8_lossy(&o.stderr)
+                    .to_lowercase()
+                    .contains("no such process")
+        })
+}
+
+/// Make the fetched copy in `tmp` the mirror of `notes_ref`, by a
+/// compare-and-swap against `old` (what was there before the fetch). A kill
+/// can only ever half-write the throwaway, never the mirror. When the swap
+/// fails, the mirror is judged only if it now holds EXACTLY origin's copy (a
+/// concurrent run got there first, or origin is unchanged under a lock).
+fn adopt(notes_ref: &str, tmp: &str, old: Option<&str>) -> Mirror {
+    let full = format!("refs/notes/{notes_ref}");
+    let Some(new) = git::stdout(&["rev-parse", "--verify", "--quiet", tmp]) else {
+        return Mirror::Unwritable;
+    };
+    if git::succeeds(&["update-ref", &full, &new, old.unwrap_or("")]) {
+        return Mirror::Fresh;
+    }
+    match git::stdout(&["rev-parse", "--verify", "--quiet", &full]) {
+        Some(now) if now == new => Mirror::Fresh,
+        _ => Mirror::Unwritable,
+    }
+}
+
+/// Bring both mirrors in line with origin: one fetch of both refs into
+/// throwaways and, when that fails without timing out, one `ls-remote` to
+/// tell "origin has no such ref" from "origin did not answer" — then, if some
+/// refs exist, one more fetch of those. A silent origin costs one call (15 s
+/// at most), a dead one two (30 s), the worst case three (45 s).
 fn sync_mirrors(loud: &mut Vec<String>) -> (Mirror, Mirror) {
     if !git::succeeds(&["remote", "get-url", "origin"]) {
         return (Mirror::NoOrigin, Mirror::NoOrigin);
     }
-    let main = format!("refs/notes/{NOTES_REF}");
-    let inputs = format!("refs/notes/{INPUTS_REF}");
-    let spec = |r: &str| format!("+{r}:{r}");
-    if matches!(
-        git::remote(&["fetch", "--quiet", "origin", &spec(&main), &spec(&inputs)]),
-        Some((0, _))
-    ) {
-        return (Mirror::Fresh, Mirror::Fresh);
-    }
-    match git::remote(&["ls-remote", "--exit-code", "origin", &main, &inputs]) {
-        Some((0, listing)) => {
-            let listed = |r: &str| {
-                listing
-                    .lines()
-                    .any(|l| l.split_whitespace().nth(1) == Some(r))
-            };
-            let mut want = Vec::new();
-            let mut state = |r: &str, n: &str| {
-                if listed(r) {
-                    want.push(spec(r));
-                    Mirror::Fresh
+    sweep_tmp_refs();
+    let pid = std::process::id();
+    let full = |r: &str| format!("refs/notes/{r}");
+    let tmp = |r: &str| format!("{TMP_NS}{pid}/{r}");
+    let spec = |r: &str| format!("+{}:{}", full(r), tmp(r));
+    let old_main = git::stdout(&["rev-parse", "--verify", "--quiet", &full(NOTES_REF)]);
+    let old_inputs = git::stdout(&["rev-parse", "--verify", "--quiet", &full(INPUTS_REF)]);
+    let adopt_both = || {
+        (
+            adopt(NOTES_REF, &tmp(NOTES_REF), old_main.as_deref()),
+            adopt(INPUTS_REF, &tmp(INPUTS_REF), old_inputs.as_deref()),
+        )
+    };
+    let states = match git::remote(&[
+        "fetch",
+        "--quiet",
+        "origin",
+        &spec(NOTES_REF),
+        &spec(INPUTS_REF),
+    ]) {
+        git::Remote::Done(0, _) => adopt_both(),
+        // Origin did not answer; asking again would only double the wait.
+        git::Remote::TimedOut => (Mirror::TimedOut, Mirror::TimedOut),
+        _ => match git::remote(&[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            &full(NOTES_REF),
+            &full(INPUTS_REF),
+        ]) {
+            git::Remote::Done(0, listing) => {
+                let listed = |r: &str| {
+                    let f = full(r);
+                    listing
+                        .lines()
+                        .any(|l| l.split_whitespace().nth(1) == Some(f.as_str()))
+                };
+                let (has_main, has_inputs) = (listed(NOTES_REF), listed(INPUTS_REF));
+                let mut want = Vec::new();
+                if has_main {
+                    want.push(spec(NOTES_REF));
+                }
+                if has_inputs {
+                    want.push(spec(INPUTS_REF));
+                }
+                let fetched = if want.is_empty() {
+                    None
                 } else {
-                    drop_mirror(loud, n)
-                }
-            };
-            let (mut m, mut i) = (state(&main, NOTES_REF), state(&inputs, INPUTS_REF));
-            if !want.is_empty() {
-                let mut args = vec!["fetch", "--quiet", "origin"];
-                args.extend(want.iter().map(String::as_str));
-                if !matches!(git::remote(&args), Some((0, _))) {
-                    for st in [&mut m, &mut i] {
-                        if *st == Mirror::Fresh {
-                            *st = Mirror::Unreachable;
-                        }
+                    let mut args = vec!["fetch", "--quiet", "origin"];
+                    args.extend(want.iter().map(String::as_str));
+                    Some(git::remote(&args))
+                };
+                let one = |present: bool, r: &str, old: Option<&str>, loud: &mut Vec<String>| {
+                    if !present {
+                        return drop_mirror(loud, r);
                     }
-                }
+                    match &fetched {
+                        Some(git::Remote::Done(0, _)) => adopt(r, &tmp(r), old),
+                        Some(git::Remote::TimedOut) => Mirror::TimedOut,
+                        _ => Mirror::Unreachable,
+                    }
+                };
+                let m = one(has_main, NOTES_REF, old_main.as_deref(), loud);
+                let i = one(has_inputs, INPUTS_REF, old_inputs.as_deref(), loud);
+                (m, i)
             }
-            (m, i)
-        }
-        Some((2, _)) => (drop_mirror(loud, NOTES_REF), drop_mirror(loud, INPUTS_REF)),
-        _ => (Mirror::Unreachable, Mirror::Unreachable),
+            git::Remote::Done(2, _) => {
+                (drop_mirror(loud, NOTES_REF), drop_mirror(loud, INPUTS_REF))
+            }
+            git::Remote::TimedOut => (Mirror::TimedOut, Mirror::TimedOut),
+            _ => (Mirror::Unreachable, Mirror::Unreachable),
+        },
+    };
+    for r in [NOTES_REF, INPUTS_REF] {
+        let _ = git::succeeds(&["update-ref", "-d", &tmp(r)]);
     }
+    states
+}
+
+/// A lock a killed git left on a MIRROR fails every later update of it; say
+/// so, with the command, rather than lose coverage in silence.
+fn lock_reason(notes_ref: &str) -> Option<String> {
+    let lock = format!("refs/notes/{notes_ref}.lock");
+    let path = git::stdout(&["rev-parse", "--git-path", &lock])?;
+    std::path::Path::new(&path).exists().then(|| {
+        format!("a git that was killed left a lock on refs/notes/{notes_ref}; if no git is running: rm {path}")
+    })
 }
 
 /// The line that says why a mirror was not judged, if it was not.
@@ -323,6 +443,13 @@ fn state_reason(notes_ref: &str, state: Mirror) -> Option<String> {
     match state {
         Mirror::Unreachable => Some(format!(
             "cannot fetch refs/notes/{notes_ref} from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything"
+        )),
+        Mirror::TimedOut => Some(format!(
+            "origin did not answer within {} s for refs/notes/{notes_ref}; local mirror not judged, running everything",
+            git::REMOTE_BUDGET_SECS
+        )),
+        Mirror::Unwritable => Some(format!(
+            "cannot update refs/notes/{notes_ref} to origin's copy; local mirror not judged"
         )),
         Mirror::Undeletable => Some(format!(
             "origin has no refs/notes/{notes_ref} but the local mirror could not be deleted (read-only .git?); local mirror not judged"
@@ -1045,6 +1172,9 @@ pub fn evaluate(
     let notes = Some((st_main, st_inputs));
     for (r, st) in [(NOTES_REF, st_main), (INPUTS_REF, st_inputs)] {
         if let Some(why) = state_reason(r, st) {
+            push_reason(&mut trail, why);
+        }
+        if let Some(why) = lock_reason(r) {
             push_reason(&mut trail, why);
         }
     }
