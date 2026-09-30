@@ -275,6 +275,11 @@ sync_mirrors() {
         st_main=no-origin; st_inputs=no-origin; return
     fi
     sweep_tmp_refs
+    # Our own throwaways, and any lock a dead run with our pid left on them.
+    for r in "$NOTES_REF" "$INPUTS_REF"; do
+        git update-ref -d "$(tmp_ref "$r")" > /dev/null 2>&1
+        rm -f "$(git rev-parse --git-path "$(tmp_ref "$r").lock" 2> /dev/null)"
+    done
     old_main=$(git rev-parse --verify --quiet "refs/notes/$NOTES_REF" 2> /dev/null)
     old_inputs=$(git rev-parse --verify --quiet "refs/notes/$INPUTS_REF" 2> /dev/null)
     remote_git fetch --quiet origin \

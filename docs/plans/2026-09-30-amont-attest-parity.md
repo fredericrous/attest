@@ -9,3 +9,27 @@ The plan lives in amont, where most of the work is. This repository carries
 its change 4: fetches into a throwaway ref with compare-and-swap, askpass and
 interactive credential managers off, no `ls-remote` after a timed-out fetch,
 dead-PID sweep of throwaways, stale-lock report. Released as 1.4.1.
+
+## Decision log (this slice)
+
+- 2026-09-30 — attest keeps the third call (a second fetch after `ls-remote`
+  answers): its bound is 15 s for a silent origin, 30 s for one that fails
+  fast, and 45 s worst case, not the plan's 30 s. SPEC states it.
+- 2026-09-30 — `notes=unwritable` is a new output value; `action.yml` lists
+  it and warns on it, as it does on `unreachable`.
+- 2026-09-30 — each run clears a lock a dead run with the same pid left on
+  its own throwaway ref, so a reused pid cannot wedge the fetch.
+- 2026-09-30 — implementation-review → approve-with-changes: the no-lock
+  fixture could not fail (fault `hang` took no lock); `hang` now plants the
+  lock a killed fetch leaves on every refspec destination.
+
+## Verification record (attest 1.4.1; input → expected → actual)
+
+| check | expected | actual |
+|---|---|---|
+| `make check` | green | conformance 152 (sh) / 144 (rust), legacy control fails, compat all, sign 128 × 2 |
+| silent origin (fault `hang`) | 1 remote call, ~15 s, no lock on the mirror, next run fetches | 1 call, 17–18 s, as expected |
+| origin answering 401, `core.askPass` marker | no askpass; plain git runs it | as expected, both implementations |
+| stale lock, origin unchanged / rewritten / lock removed | covered / `unwritable` + `rm` line / covered | as expected |
+| dead-PID throwaway / live one | swept / kept | as expected (unix; skipped on Windows) |
+| the new fixtures against v1.4.0's verify.sh | fail | 8 failed (one call, one deadline, askpass, stale lock ×2, sweep, …) |

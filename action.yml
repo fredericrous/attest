@@ -80,7 +80,9 @@ outputs:
     description: >-
       What became of refs/notes/amont-attest, origin's mirror: fetched, absent
       (origin has none; the local mirror was deleted), unreachable (origin did
-      not answer; nothing was judged), undeletable, or no-origin.
+      not answer; nothing was judged), unwritable (origin's copy could not
+      replace a stale local one, a leftover lock say; nothing was judged),
+      undeletable, or no-origin.
     value: ${{ steps.verify.outputs.notes }}
   inputs_notes:
     description: The same, for refs/notes/amont-attest-inputs.
@@ -124,4 +126,6 @@ runs:
         case "$out" in
           *"notes=unreachable"*)
             echo "::warning title=attest::origin's notes could not be fetched; nothing was skipped (see the log above)" ;;
+          *"notes=unwritable"*)
+            echo "::warning title=attest::a stale lock keeps origin's notes out of the mirror; nothing was skipped (the log above says what to rm)" ;;
         esac
