@@ -23,12 +23,16 @@ dead-PID sweep of throwaways, stale-lock report. Released as 1.4.1.
   fixture could not fail (fault `hang` took no lock); `hang` now plants the
   lock a killed fetch leaves on every refspec destination.
 
-- 2026-09-30 — delta implementation-review → approve-with-changes: both
+- 2026-09-30 — delta implementation-review of tree 513a33f → approve-with-changes: both
   action warnings can print; two known limits are stated in code rather than
   fixed (a failed rm of our own throwaway's lock reads as `unreachable`,
   safe; a killed fetch's lock with no ref beside it is not swept, only
   replaced when its pid comes round). The own-pid clearing has no fixture:
   a test cannot know the verifier's pid.
+
+- 2026-09-30 — delta implementation-review of tree 9accc9b →
+  approve-with-changes, low only: this entry's tree ids, and `unwritable`
+  missing from one verify.sh comment (fixed).
 
 ## Verification record (attest 1.4.1; input → expected → actual)
 

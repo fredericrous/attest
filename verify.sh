@@ -125,7 +125,7 @@ to_json() {
 #   notes=fetched                      (refs/notes/amont-attest)
 #   inputs_notes=absent                (refs/notes/amont-attest-inputs)
 #
-# each one of fetched, absent, unreachable, undeletable, no-origin — or empty
+# each one of fetched, absent, unreachable, unwritable, undeletable, no-origin — or empty
 # when the verifier stopped before reading any notes.
 #
 # Both live here rather than in the two action.yml files, so the escaping above
