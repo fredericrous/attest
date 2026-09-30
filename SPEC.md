@@ -344,22 +344,43 @@ repository it runs in as **origin's mirror**, never as a store of its own
 | the fetch succeeded | `fetched` | is origin's ref, and is judged |
 | origin answered and has no such ref | `absent` | is **deleted**, with a line saying how to restore it; nothing judged |
 | as above, but the delete failed (a read-only `.git`) | `undeletable` | is not judged |
-| origin is configured and did not answer | `unreachable` | is **not judged**: a stale mirror on a persistent runner must not outlive a revocation |
+| origin is configured and did not answer (or the deadline cut it off) | `unreachable` | is **not judged**: a stale mirror on a persistent runner must not outlive a revocation |
+| origin's copy was fetched but cannot become the local ref (a stale lock) | `unwritable` | is not judged; the reason names the lock and the `rm` that clears it |
 | there is no remote named `origin` | `no-origin` | is judged as it is — for fixtures and local use; CI always has an origin |
 
+**The fetch lands in a throwaway ref** (1.4.1), outside `refs/notes/` —
+`refs/attest-tmp/<pid>/<ref>` — and becomes the mirror by a local
+compare-and-swap against what the mirror held before the fetch. The deadline
+kills git, and a fetch killed while writing the mirror itself would leave
+`<ref>.lock` behind, failing every later update of it; a kill can now only
+half-write the throwaway. When the swap fails, the mirror is judged only if
+it holds EXACTLY the oid just fetched (a concurrent run got there first, or
+origin is unchanged under a lock); anything else is `unwritable`. Throwaways
+of runs that were killed before their cleanup are removed by the next run,
+but only those whose process is gone (`kill -0` answers "No such process");
+a live run's is left alone. A lock left on a mirror by an older version is
+reported with the command that clears it.
+
 "Did not answer" is decided with at most two remote calls: the fetch of both
-refs and, when it fails, one `git ls-remote --exit-code origin` naming both.
-Exit 0 lists the refs that exist (an unlisted one is absent; the listed ones
-are fetched once more, and a failure there is `unreachable`); exit 2 means
-neither exists; anything else is `unreachable` for both. Every remote call
-runs with prompts off (`GIT_TERMINAL_PROMPT=0`, stdin closed, ssh in batch
-mode with a 10 s connect timeout unless the user configured an ssh command
-through `GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand`), curl's low-speed
-limit of 10 s, and a 15 s deadline of the verifier's own: a verifier that
-waits for a password or a dead host has broken "exit 0" as surely as a
-crash. A dead origin therefore costs two calls, at most 30 s; the worst
-case, an origin that answers `ls-remote` but stalls the second fetch, three
-calls, at most 45 s.
+refs and, when it fails without timing out, one `git ls-remote --exit-code
+origin` naming both. A fetch the deadline cut off is not followed by
+`ls-remote` — origin already did not answer. Exit 0 lists the refs that exist
+(an unlisted one is absent; the listed ones are fetched once more, and a
+failure there is `unreachable`); exit 2 means neither exists; anything else is
+`unreachable` for both. Every remote call runs without prompts: stdin closed,
+`GIT_TERMINAL_PROMPT=0`, and — because git runs `GIT_ASKPASS`,
+`core.askPass` and `SSH_ASKPASS` BEFORE it consults that variable — a
+`GIT_ASKPASS` that is present and EMPTY, which makes it run none of them;
+credential managers are told not to interact (`GCM_INTERACTIVE=never`,
+`credential.interactive=never`) while their stored credentials still work;
+ssh runs in batch mode with a 10 s connect timeout unless the user
+configured an ssh command through `GIT_SSH_COMMAND`, `GIT_SSH` or
+`core.sshCommand` (that command may prompt on the terminal; the deadline
+bounds the wait). Then curl's low-speed limit of 10 s, and a 15 s deadline of
+the verifier's own: a verifier that waits for a password or a dead host has
+broken "exit 0" as surely as a crash. A silent origin costs one call, at
+most 15 s; one that fails fast, two, at most 30 s; the worst case, an origin
+that answers `ls-remote` but stalls the second fetch, three, at most 45 s.
 
 **Unpushed blocks** — written by a producer that did not push, such as
 `sign.sh --no-push` — live in `refs/notes/attest-local/amont-attest` and

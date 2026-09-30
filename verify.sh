@@ -161,7 +161,7 @@ else
     [ -f "$signers" ] || uncovered "$signers does not exist"
 fi
 
-# The notes refs, from origin. SPEC.md, "Lookup".
+# The notes refs, from origin. SPEC.md, "Which refs are read".
 #
 # refs/notes/amont-attest and refs/notes/amont-attest-inputs are ORIGIN'S
 # MIRROR, and origin is the only place an attestation can be revoked. So:
@@ -170,13 +170,22 @@ fi
 #   absent       origin answered and has no such ref: the local mirror is
 #                DELETED (with a line saying how to restore it), nothing judged
 #   undeletable  as absent, but the delete failed: the stale mirror is not judged
-#   unreachable  origin is configured and did not answer: not judged, because a
-#                stale mirror on a persistent runner must not outlive a revocation
+#   unreachable  origin is configured and did not answer (or timed out): not
+#                judged, because a stale mirror on a persistent runner must not
+#                outlive a revocation
+#   unwritable   origin's copy was fetched but could not become the local ref
+#                (a stale lock, say): the stale local copy is not judged
 #   no-origin    no remote named origin at all: the local ref is judged as it is.
 #                That is for fixtures and local use; CI always has an origin.
 #
 # Never a prompt, never an unbounded wait: a verifier that asks for a password
 # or hangs on a dead host has broken "exit 0, always" as surely as a crash.
+# GIT_TERMINAL_PROMPT=0 alone is not enough: git runs GIT_ASKPASS, core.askPass
+# and SSH_ASKPASS BEFORE consulting it, and a GIT_ASKPASS that is present and
+# EMPTY makes it run none of them. Credential managers are told not to
+# interact; their stored credentials still work. Returns 124 when the deadline
+# cut the call off.
+REMOTE_BUDGET=15
 remote_git() {
     local ssh_cmd=${GIT_SSH_COMMAND:-}
     # The user's own ssh (GIT_SSH_COMMAND, GIT_SSH or core.sshCommand) is
@@ -188,19 +197,58 @@ remote_git() {
     # once a connection is up, and a host that drops packets never gets there.
     # The watchdog's descriptors go to /dev/null so nothing waits on its pipe.
     if [ -n "$ssh_cmd" ]; then
-        GIT_SSH_COMMAND=$ssh_cmd GIT_TERMINAL_PROMPT=0 \
-            git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 "$@" < /dev/null &
+        GIT_SSH_COMMAND=$ssh_cmd GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GCM_INTERACTIVE=never \
+            git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 -c credential.interactive=never "$@" < /dev/null &
     else
-        GIT_TERMINAL_PROMPT=0 \
-            git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 "$@" < /dev/null &
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GCM_INTERACTIVE=never \
+            git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 -c credential.interactive=never "$@" < /dev/null &
     fi
     local pid=$! watchdog rc
-    ( sleep 15; kill "$pid" ) > /dev/null 2>&1 &
+    ( sleep "$REMOTE_BUDGET"; kill "$pid" ) > /dev/null 2>&1 &
     watchdog=$!
     wait "$pid"; rc=$?
-    kill "$watchdog" > /dev/null 2>&1
+    # A watchdog still sleeping means git ended on its own; one that is gone
+    # has fired.
+    if kill -0 "$watchdog" 2> /dev/null; then
+        kill "$watchdog" > /dev/null 2>&1
+        wait "$watchdog" 2> /dev/null
+        return "$rc"
+    fi
     wait "$watchdog" 2> /dev/null
-    return "$rc"
+    return 124
+}
+
+# Where fetches land before they become the mirror: outside refs/notes/, one
+# directory per process id, so no notes push or pruning fetch touches them.
+TMP_NS=refs/attest-tmp/
+tmp_ref() { printf '%s%s/%s' "$TMP_NS" "$$" "$1"; }
+
+# Remove the throwaways of runs killed before their cleanup — only those whose
+# process is gone ("No such process", in the C locale), so a concurrent run in
+# the same clone keeps its own.
+sweep_tmp_refs() {
+    local r p
+    for r in $(git for-each-ref --format='%(refname)' "$TMP_NS" 2> /dev/null); do
+        p=${r#"$TMP_NS"}; p=${p%%/*}
+        case $p in '' | *[!0123456789]*) continue ;; esac
+        [ "$p" != "$$" ] || continue
+        case "$(LC_ALL=C kill -0 "$p" 2>&1)" in
+            *[Nn]o\ such\ process*) git update-ref -d "$r" > /dev/null 2>&1 ;;
+        esac
+    done
+}
+
+# Make the fetched copy of $1 the mirror, by a compare-and-swap against $2
+# (what was there before the fetch; empty = must not exist). A kill can only
+# half-write the throwaway, never the mirror. When the swap fails, the mirror
+# is judged only if it now holds EXACTLY origin's copy (a concurrent run got
+# there first, or origin is unchanged under a lock). Prints the state.
+adopt() { # ref old
+    local new now
+    new=$(git rev-parse --verify --quiet "$(tmp_ref "$1")" 2> /dev/null) || { echo unwritable; return; }
+    if git update-ref "refs/notes/$1" "$new" "$2" > /dev/null 2>&1; then echo fetched; return; fi
+    now=$(git rev-parse --verify --quiet "refs/notes/$1" 2> /dev/null)
+    if [ "$now" = "$new" ]; then echo fetched; else echo unwritable; fi
 }
 
 # Delete the mirror of $1 because origin has none; prints the new state.
@@ -215,55 +263,86 @@ drop_mirror() { # ref
     fi
 }
 
+# One fetch of both refs into throwaways and, when that fails WITHOUT timing
+# out, one ls-remote to tell "origin has no such ref" from "origin did not
+# answer" — then, if some refs exist, one more fetch of those. A silent origin
+# costs one call (15 s at most), a dead one two (30 s), the worst case three.
+timed_out=
 sync_mirrors() {
-    local listing rc
+    local listing rc old_main old_inputs has_main='' has_inputs=''
     local -a want=()
     if ! git remote get-url origin > /dev/null 2>&1; then
         st_main=no-origin; st_inputs=no-origin; return
     fi
-    if remote_git fetch --quiet origin \
-        "+refs/notes/$NOTES_REF:refs/notes/$NOTES_REF" \
-        "+refs/notes/$INPUTS_REF:refs/notes/$INPUTS_REF" > /dev/null 2>&1; then
-        st_main=fetched; st_inputs=fetched; return
-    fi
-    # One fetch naming both refs fails when EITHER is missing, so ask which
-    # exist: exit 0 lists the ones that do, exit 2 means neither, anything
-    # else means origin did not answer.
-    listing=$(remote_git ls-remote --exit-code origin "refs/notes/$NOTES_REF" "refs/notes/$INPUTS_REF" 2> /dev/null); rc=$?
-    case $rc in
-        0)
-            if printf '%s\n' "$listing" | awk -v r="refs/notes/$NOTES_REF" '$2 == r { f = 1 } END { exit !f }'; then
-                want+=("+refs/notes/$NOTES_REF:refs/notes/$NOTES_REF"); st_main=fetched
-            else
-                st_main=$(drop_mirror "$NOTES_REF")
-            fi
-            if printf '%s\n' "$listing" | awk -v r="refs/notes/$INPUTS_REF" '$2 == r { f = 1 } END { exit !f }'; then
-                want+=("+refs/notes/$INPUTS_REF:refs/notes/$INPUTS_REF"); st_inputs=fetched
-            else
-                st_inputs=$(drop_mirror "$INPUTS_REF")
-            fi
-            # A third call, only when origin answered: the refs it has.
-            if [ "${#want[@]}" -gt 0 ]; then
-                if ! remote_git fetch --quiet origin "${want[@]}" > /dev/null 2>&1; then
-                    [ "$st_main" = fetched ] && st_main=unreachable
-                    [ "$st_inputs" = fetched ] && st_inputs=unreachable
+    sweep_tmp_refs
+    old_main=$(git rev-parse --verify --quiet "refs/notes/$NOTES_REF" 2> /dev/null)
+    old_inputs=$(git rev-parse --verify --quiet "refs/notes/$INPUTS_REF" 2> /dev/null)
+    remote_git fetch --quiet origin \
+        "+refs/notes/$NOTES_REF:$(tmp_ref "$NOTES_REF")" \
+        "+refs/notes/$INPUTS_REF:$(tmp_ref "$INPUTS_REF")" > /dev/null 2>&1; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        st_main=$(adopt "$NOTES_REF" "$old_main")
+        st_inputs=$(adopt "$INPUTS_REF" "$old_inputs")
+    elif [ "$rc" -eq 124 ]; then
+        # Origin did not answer; asking again would only double the wait.
+        timed_out=1; st_main=unreachable; st_inputs=unreachable
+    else
+        listing=$(remote_git ls-remote --exit-code origin "refs/notes/$NOTES_REF" "refs/notes/$INPUTS_REF" 2> /dev/null); rc=$?
+        case $rc in
+            0)
+                printf '%s\n' "$listing" | ATTEST_R="refs/notes/$NOTES_REF" awk '$2 == ENVIRON["ATTEST_R"] { f = 1 } END { exit !f }' && has_main=1
+                printf '%s\n' "$listing" | ATTEST_R="refs/notes/$INPUTS_REF" awk '$2 == ENVIRON["ATTEST_R"] { f = 1 } END { exit !f }' && has_inputs=1
+                [ -n "$has_main" ] && want+=("+refs/notes/$NOTES_REF:$(tmp_ref "$NOTES_REF")")
+                [ -n "$has_inputs" ] && want+=("+refs/notes/$INPUTS_REF:$(tmp_ref "$INPUTS_REF")")
+                rc=1
+                # A third call, only when origin answered: the refs it has.
+                if [ "${#want[@]}" -gt 0 ]; then
+                    remote_git fetch --quiet origin "${want[@]}" > /dev/null 2>&1; rc=$?
                 fi
-            fi ;;
-        2) st_main=$(drop_mirror "$NOTES_REF"); st_inputs=$(drop_mirror "$INPUTS_REF") ;;
-        *) st_main=unreachable; st_inputs=unreachable ;;
-    esac
+                one() { # present ref old
+                    if [ -z "$1" ]; then drop_mirror "$2"; return; fi
+                    case $rc in
+                        0) adopt "$2" "$3" ;;
+                        124) timed_out=1; echo unreachable ;;
+                        *) echo unreachable ;;
+                    esac
+                }
+                st_main=$(one "$has_main" "$NOTES_REF" "$old_main")
+                st_inputs=$(one "$has_inputs" "$INPUTS_REF" "$old_inputs")
+                [ "$rc" -eq 124 ] && timed_out=1 ;;
+            2) st_main=$(drop_mirror "$NOTES_REF"); st_inputs=$(drop_mirror "$INPUTS_REF") ;;
+            124) timed_out=1; st_main=unreachable; st_inputs=unreachable ;;
+            *) st_main=unreachable; st_inputs=unreachable ;;
+        esac
+    fi
+    git update-ref -d "$(tmp_ref "$NOTES_REF")" > /dev/null 2>&1
+    git update-ref -d "$(tmp_ref "$INPUTS_REF")" > /dev/null 2>&1
+    return 0
 }
 sync_mirrors
 
 # Say what became of each ref, in a fixed order (both implementations do).
 say_state() { # ref state
     case $2 in
-        unreachable) note "cannot fetch refs/notes/$1 from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything" ;;
+        unreachable)
+            if [ -n "$timed_out" ]; then
+                note "origin did not answer within $REMOTE_BUDGET s for refs/notes/$1; local mirror not judged, running everything"
+            else
+                note "cannot fetch refs/notes/$1 from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything"
+            fi ;;
         undeletable) note "origin has no refs/notes/$1 but the local mirror could not be deleted (read-only .git?); local mirror not judged" ;;
+        unwritable) note "cannot update refs/notes/$1 to origin's copy; local mirror not judged" ;;
     esac
 }
-say_state "$NOTES_REF" "$st_main"
-say_state "$INPUTS_REF" "$st_inputs"
+# A lock a killed git left on a mirror fails every later update of it.
+say_lock() { # ref
+    local path
+    path=$(git rev-parse --git-path "refs/notes/$1.lock" 2> /dev/null) || return 0
+    [ -e "$path" ] && note "a git that was killed left a lock on refs/notes/$1; if no git is running: rm $path"
+    return 0
+}
+say_state "$NOTES_REF" "$st_main"; say_lock "$NOTES_REF"
+say_state "$INPUTS_REF" "$st_inputs"; say_lock "$INPUTS_REF"
 if [ -z "$include_local" ]; then
     for r in "$NOTES_REF" "$INPUTS_REF"; do
         [ -n "$(git notes --ref "attest-local/$r" list 2> /dev/null | head -1)" ] &&

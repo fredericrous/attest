@@ -94,26 +94,50 @@ pub fn stdout_with_input_in(dir: &Path, args: &[&str], input: &[u8]) -> Option<S
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// How a call to a remote ended.
+pub enum Remote {
+    /// git ran to completion: its exit code and stdout.
+    Done(i32, String),
+    /// The deadline killed it: the remote did not answer.
+    TimedOut,
+    /// git could not run, or died to a signal of its own.
+    Failed,
+}
+
+/// Seconds each remote call may take.
+pub const REMOTE_BUDGET_SECS: u64 = 15;
+
 /// `git <args>` against a REMOTE: never a prompt, never an unbounded wait.
 ///
 /// A verifier that asks for a password, or hangs on a host that drops
-/// packets, has broken "exit 0, always" as surely as a crash. So: no
-/// terminal prompt, stdin closed, ssh in batch mode with a connect timeout
-/// unless the user configured their own ssh command, curl's low-speed limit
-/// for a stalled https transfer, and a deadline of our own on top, because
-/// curl's limit only starts once a connection is up. Returns the exit code
-/// and stdout; `None` when git could not run, was killed, or ran out of time.
-pub fn remote(args: &[&str]) -> Option<(i32, String)> {
+/// packets, has broken "exit 0, always" as surely as a crash. So: stdin
+/// closed; no terminal prompt — and, because git runs `GIT_ASKPASS`,
+/// `core.askPass` and `SSH_ASKPASS` BEFORE it consults
+/// `GIT_TERMINAL_PROMPT`, a `GIT_ASKPASS` that is present and EMPTY, which
+/// makes it run none of them; credential managers told not to interact
+/// (`GCM_INTERACTIVE`, `credential.interactive`), their stored credentials
+/// still used; ssh in batch mode with a connect timeout unless the user
+/// configured their own ssh command; curl's low-speed limit for a stalled
+/// transfer; and a deadline of our own on top, because curl's limit only
+/// starts once a connection is up.
+pub fn remote(args: &[&str]) -> Remote {
     use std::time::{Duration, Instant};
     let mut cmd = Command::new("git");
-    cmd.args(["-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=10"])
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    // The user's own ssh (GIT_SSH_COMMAND, GIT_SSH or core.sshCommand) is
-    // left alone: replacing it could drop the key selection it exists for.
+    cmd.args([
+        "-c",
+        "http.lowSpeedLimit=1",
+        "-c",
+        "http.lowSpeedTime=10",
+        "-c",
+        "credential.interactive=never",
+    ])
+    .args(args)
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env("GIT_ASKPASS", "")
+    .env("GCM_INTERACTIVE", "never")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     let set = |v: &str| std::env::var_os(v).is_some_and(|v| !v.is_empty());
     let own_ssh = set("GIT_SSH_COMMAND")
         || set("GIT_SSH")
@@ -124,27 +148,37 @@ pub fn remote(args: &[&str]) -> Option<(i32, String)> {
             "ssh -o BatchMode=yes -o ConnectTimeout=10",
         );
     }
-    let mut child = cmd.spawn().ok()?;
+    let Ok(mut child) = cmd.spawn() else {
+        return Remote::Failed;
+    };
     // The output is small (an ls-remote of two refs); read it on a thread so
     // a full pipe can never stall the child while we wait on the deadline.
-    let mut out = child.stdout.take()?;
+    let Some(mut out) = child.stdout.take() else {
+        return Remote::Failed;
+    };
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = std::io::Read::read_to_end(&mut out, &mut buf);
         buf
     });
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(REMOTE_BUDGET_SECS);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Remote::TimedOut;
             }
+            Err(_) => return Remote::Failed,
         }
     };
-    let stdout = reader.join().ok()?;
-    Some((status.code()?, String::from_utf8_lossy(&stdout).to_string()))
+    let Ok(stdout) = reader.join() else {
+        return Remote::Failed;
+    };
+    match status.code() {
+        Some(code) => Remote::Done(code, String::from_utf8_lossy(&stdout).to_string()),
+        None => Remote::Failed,
+    }
 }

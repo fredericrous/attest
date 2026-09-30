@@ -504,18 +504,97 @@ fi
 
 case "$IMPL" in bash*) native= ;; *) native=1 ;; esac
 # A host that never answers at all — not even the connection curl's
-# low-speed limit waits on — is ended by the verifier's own 15 s deadline
-# per call: the fetch, then ls-remote, then nothing.
+# low-speed limit waits on — is ended by the verifier's own 15 s deadline,
+# after ONE call: a fetch that timed out is not followed by ls-remote (1.4.1).
+# The killed fetch wrote only its throwaway ref, so no lock is left on the
+# mirror and the next run fetches normally.
 if [ -n "$native" ] && [ "$OS" = windows ]; then
     printf '  SKIP  a silent origin is cut off by the deadline (the faulty-git wrapper cannot reach a native binary on Windows)\n'
 else
     make_remote_repo
     mkdir -p "$WORK/fault"; tr -d '\r' < "$HERE/tests/fault/git" > "$WORK/fault/git"; chmod +x "$WORK/fault/git"
+    sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
+    : > "$WORK/calls"
     t0=$(date +%s)
-    got=$(ATTEST_REAL_GIT=$(command -v git) ATTEST_FAULT=hang PATH="$WORK/fault:$PATH" gha_in "$R")
+    got=$(ATTEST_REAL_GIT=$(command -v git) ATTEST_FAULT=hang ATTEST_FAULT_LOG="$WORK/calls" PATH="$WORK/fault:$PATH" gha_in "$R")
     t=$(( $(date +%s) - t0 ))
     assert_eq "a silent origin is cut off by the deadline" "$got" "notes=unreachable inputs_notes=unreachable"
-    if [ "$t" -ge 25 ] && [ "$t" -le 40 ]; then ok "...after two 15 s deadlines (took ${t} s)"; else fail "...after two 15 s deadlines" "took ${t} s"; fi
+    assert_eq "...after one remote call" "$(wc -l < "$WORK/calls" | tr -d ' ')" 1
+    if [ "$t" -ge 12 ] && [ "$t" -le 25 ]; then ok "...after one 15 s deadline (took ${t} s)"; else fail "...after one 15 s deadline" "took ${t} s"; fi
+    if [ -e "$(git -C "$R" rev-parse --git-path refs/notes/amont-attest.lock)" ]; then
+        fail "...and leaves no lock on the mirror" "lock present"
+    else
+        ok "...and leaves no lock on the mirror"
+    fi
+    assert_eq "...and the next run fetches" "$(gha_in "$R")" "notes=fetched inputs_notes=absent"
+fi
+
+# No askpass ever runs against an origin that wants credentials — not even
+# core.askPass, which git runs BEFORE it consults GIT_TERMINAL_PROMPT. The
+# origin is an http listener that answers every request with 401; the
+# negative control (plain git, prompts off) proves the askpass is reachable.
+if [ -n "$PY" ] && [ "$OS" != windows ]; then
+    "$PY" -c '
+import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(16)
+print(s.getsockname()[1], flush=True)
+while True:
+    c, _ = s.accept()
+    try:
+        c.recv(65536)
+        c.sendall(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    finally:
+        c.close()
+' > "$WORK/port401" &
+    listener=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WORK/port401" ] && break; sleep 1; done
+    make_remote_repo
+    url="http://127.0.0.1:$(cat "$WORK/port401")/repo.git"
+    git -C "$R" remote set-url origin "$url"
+    printf '#!/bin/sh\ntouch "%s"\necho x\n' "$WORK/asked" > "$WORK/askpass"; chmod +x "$WORK/askpass"
+    git -C "$R" config core.askPass "$WORK/askpass"
+    git -C "$R" config credential.helper ''
+    rm -f "$WORK/asked"
+    assert_eq "an origin that wants credentials is unreachable" "$(gha_in "$R")" "notes=unreachable inputs_notes=unreachable"
+    if [ -e "$WORK/asked" ]; then fail "...and no askpass ran" "the askpass ran"; else ok "...and no askpass ran"; fi
+    GIT_TERMINAL_PROMPT=0 git -C "$R" ls-remote "$url" > /dev/null 2>&1 < /dev/null
+    if [ -e "$WORK/asked" ]; then ok "...while plain git does run it (negative control)"; else fail "...negative control" "plain git ran no askpass either"; fi
+    kill "$listener" 2> /dev/null; wait "$listener" 2> /dev/null
+else
+    printf '  SKIP  no askpass runs (no python here, or Windows)\n'
+fi
+
+# A lock a killed git left on the mirror pins a stale copy: while origin is
+# unchanged that copy IS origin's and is judged; once origin moves on (a new
+# block, or a rewrite revoking one) it is not, and the log says how to clear
+# the lock.
+make_remote_repo
+sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
+check "a mirror in sync covers" "ci-fmt" "$R"
+lock=$(git -C "$R" rev-parse --git-path refs/notes/amont-attest.lock); lock_abs=$R/$lock
+case $lock in /*) lock_abs=$lock ;; esac
+: > "$lock_abs"
+check "a stale lock, origin unchanged: still origin's copy" "ci-fmt" "$R"
+git --git-dir="$ORIGIN" -c user.email=ci@example.org -c user.name=CI notes --ref amont-attest add -f -m rewritten "$(git -C "$R" rev-parse 'HEAD^{tree}')" 2> /dev/null
+assert_eq "a stale lock, origin rewritten: the stale copy is not judged" "$(gha_in "$R")" "notes=unwritable inputs_notes=absent"
+explain_in "$R"
+case $ERR in *"a git that was killed left a lock on refs/notes/amont-attest; if no git is running: rm "*) ok "...and the log says how to clear it" ;; *) fail "...and the log says how to clear it" "$ERR" ;; esac
+rm -f "$lock_abs"
+
+# Throwaway refs of runs killed before their cleanup are swept — only those
+# whose process is gone; a live one's stays. Not on Windows, where liveness
+# cannot be asked and nothing is swept, by design.
+if [ "$OS" = windows ]; then
+    printf '  SKIP  a dead run'"'"'s throwaway is swept (no liveness check on Windows)\n'
+else
+make_remote_repo
+sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
+git -C "$R" update-ref refs/attest-tmp/4194305/amont-attest HEAD
+git -C "$R" update-ref "refs/attest-tmp/$$/amont-attest" HEAD
+run_impl "$R"
+assert_eq "a dead run's throwaway is swept, a live one's kept" \
+    "$(git -C "$R" for-each-ref --format='%(refname)' refs/attest-tmp/ | tr '\n' ' ')" "refs/attest-tmp/$$/amont-attest "
+git -C "$R" update-ref -d "refs/attest-tmp/$$/amont-attest"
 fi
 
 # The two implementations say the same thing, line for line, about an origin

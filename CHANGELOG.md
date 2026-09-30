@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.1
+
+Two defects in 1.4.0's remote calls, found while bringing amont to parity.
+
+- **A fetch killed by the deadline could wedge the mirror.** It fetched
+  straight into `refs/notes/amont-attest[-inputs]`; killed mid-write, git
+  could leave a `.lock` that failed every later update, and later runs then
+  judged a copy nobody refreshed. Fetches now land in a throwaway ref
+  (`refs/attest-tmp/<pid>/…`, outside `refs/notes/`) and become the mirror
+  by compare-and-swap; after a failed swap the mirror is judged only if it
+  holds exactly what was fetched (`notes=unwritable` otherwise). A lock left
+  by an older version is reported with the `rm` that clears it.
+- **`GIT_TERMINAL_PROMPT=0` did not stop askpass.** git runs `GIT_ASKPASS`,
+  `core.askPass` and `SSH_ASKPASS` before consulting it, so a verifier under
+  VS Code, or with an interactive credential manager, could open a prompt and
+  sit out the deadline. Remote calls now set `GIT_ASKPASS` present and empty,
+  `GCM_INTERACTIVE=never` and `credential.interactive=never`.
+- A fetch that timed out is no longer followed by `ls-remote`: a silent
+  origin costs 15 s, not 30.
+
 ## 1.4.0
 
 An audit of 1.3.1, applied.
