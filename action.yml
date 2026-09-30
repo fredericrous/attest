@@ -123,9 +123,12 @@ runs:
         printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
         # A mirror nobody could fetch covers nothing, silently in the gates —
         # so say it where a fleet-wide slowdown would otherwise hide it.
+        # Two checks, not one case: both can be true, and each deserves its line.
         case "$out" in
           *"notes=unreachable"*)
             echo "::warning title=attest::origin's notes could not be fetched; nothing was skipped (see the log above)" ;;
+        esac
+        case "$out" in
           *"notes=unwritable"*)
             echo "::warning title=attest::a stale lock keeps origin's notes out of the mirror; nothing was skipped (the log above says what to rm)" ;;
         esac

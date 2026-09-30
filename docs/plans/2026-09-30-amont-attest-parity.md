@@ -23,13 +23,20 @@ dead-PID sweep of throwaways, stale-lock report. Released as 1.4.1.
   fixture could not fail (fault `hang` took no lock); `hang` now plants the
   lock a killed fetch leaves on every refspec destination.
 
+- 2026-09-30 — delta implementation-review → approve-with-changes: both
+  action warnings can print; two known limits are stated in code rather than
+  fixed (a failed rm of our own throwaway's lock reads as `unreachable`,
+  safe; a killed fetch's lock with no ref beside it is not swept, only
+  replaced when its pid comes round). The own-pid clearing has no fixture:
+  a test cannot know the verifier's pid.
+
 ## Verification record (attest 1.4.1; input → expected → actual)
 
 | check | expected | actual |
 |---|---|---|
-| `make check` | green | conformance 152 (sh) / 144 (rust), legacy control fails, compat all, sign 128 × 2 |
+| `make check` (tree 513a33f and after) | green | conformance 152 (sh) / 144 (rust), legacy control fails, compat all, sign 129 × 2 |
 | silent origin (fault `hang`) | 1 remote call, ~15 s, no lock on the mirror, next run fetches | 1 call, 17–18 s, as expected |
 | origin answering 401, `core.askPass` marker | no askpass; plain git runs it | as expected, both implementations |
-| stale lock, origin unchanged / rewritten / lock removed | covered / `unwritable` + `rm` line / covered | as expected |
+| stale lock, origin unchanged / rewritten / lock removed | covered / `unwritable` + `rm` line / `notes=fetched` (coverage gone: origin holds a rewritten note) | as expected |
 | dead-PID throwaway / live one | swept / kept | as expected (unix; skipped on Windows) |
-| the new fixtures against v1.4.0's verify.sh | fail | 8 failed (one call, one deadline, askpass, stale lock ×2, sweep, …) |
+| the new fixtures against v1.4.0's verify.sh | fail | 9 failed (one call, one deadline, no lock on the mirror, askpass, stale lock ×2, sweep, …) |
