@@ -276,6 +276,9 @@ sync_mirrors() {
     fi
     sweep_tmp_refs
     # Our own throwaways, and any lock a dead run with our pid left on them.
+    # Known limits: an rm that fails leaves the fetch to fail and read as
+    # "unreachable" (safe: nothing judged); a killed fetch's lock with no ref
+    # beside it is not swept, only overwritten when its pid comes round again.
     for r in "$NOTES_REF" "$INPUTS_REF"; do
         git update-ref -d "$(tmp_ref "$r")" > /dev/null 2>&1
         rm -f "$(git rev-parse --git-path "$(tmp_ref "$r").lock" 2> /dev/null)"

@@ -355,6 +355,9 @@ fn sync_mirrors(loud: &mut Vec<String>) -> (Mirror, Mirror) {
     let tmp = |r: &str| format!("{TMP_NS}{pid}/{r}");
     let spec = |r: &str| format!("+{}:{}", full(r), tmp(r));
     // Our own throwaways, and any lock a dead run with our pid left on them.
+    // Known limits: a remove that fails leaves the fetch to fail and read as
+    // unreachable (safe: nothing judged); a killed fetch's lock with no ref
+    // beside it is not swept, only replaced when its pid comes round again.
     for r in [NOTES_REF, INPUTS_REF] {
         let _ = git::succeeds(&["update-ref", "-d", &tmp(r)]);
         if let Some(lock) = git::stdout(&["rev-parse", "--git-path", &format!("{}.lock", tmp(r))]) {
