@@ -626,8 +626,8 @@ provenance block can never be replayed as an attestation, and an
 
 **The handoff.** amont-agent writes the unsigned payload to
 `<config dir>/amont-agent/provenance/<repo>/<commit>`, where `<config dir>`
-is `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude` (`%USERPROFILE%\.claude` on
-Windows), and `<repo>` is spelled as in amont-agent's
+is `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`, else `%USERPROFILE%\.claude`
+(amont-agent's `settings::config_dir`), and `<repo>` is spelled as in amont-agent's
 `implementation-review/by-tree/<repo>/`: the name of the directory holding
 the repository's common git directory. Only amont-agent's hook writes there.
 amont's pre-push reads that one path — never a path a git config key could
@@ -637,10 +637,14 @@ signs and publishes it, and deletes the file once published.
 **What the signature says, and no more.** This machine's amont-agent recorded
 these lines and amont checked `tree` against the pushed commit. A reader
 checks `plan` itself, against the plan file in `tree`. Nothing checks
-`review` and `preview`: only amont-agent's guard on its store protects them.
+`review` and `preview`: only amont-agent's guard on its store protects them,
+and that guard is best-effort against a shell command that writes the file.
 Anyone holding the key can sign any payload, as for attestations.
 
 **Reading it.** A record whose `commit` is not reachable from origin is
 ignored: amont publishes before the push delivers, so a push that failed
 can leave a note behind. A record is found on the pull request's head
-commit, else on the merge commit's tree, else by its `patch` line.
+commit, else on the merge commit's tree, else by its `patch` line. To match by
+`patch`, a reader hashes the merge commit's own change the same way: the
+diff from its first parent, `docs/plans` excluded, through `git patch-id
+--verbatim`.
