@@ -409,10 +409,8 @@ canon_oid=
 plan_exempt_off "$object_tree"
 case $? in
     0) say "planExempt is off here; no canonical tree" ;;
-    1) canon_oid=$(canon_of "$object_tree") && [ -n "$canon_oid" ] || {
-           canon_oid=
-           say "cannot compute the canonical tree; none attached"
-       } ;;
+    1) canon_oid=$(canon_of "$object_tree") || canon_oid=
+       [ -n "$canon_oid" ] || say "cannot compute the canonical tree; none attached" ;;
     *) say "cannot read amont.conf; no canonical tree" ;;
 esac
 
