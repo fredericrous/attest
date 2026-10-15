@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **SPEC: `amont-provenance-v1`.** The format of the signed record amont
+  publishes in `refs/notes/amont-provenance` (decisions ADR-0036): the plan
+  and the review verdict a push carried, its tree and its branch patch. It is
+  not an attestation, and no verifier here reads it; the section is the
+  contract between amont-agent, which writes the payload, and amont, which
+  signs it.
+
 ## 1.5.0
 
 Plan-only commits skip with no declaration.
