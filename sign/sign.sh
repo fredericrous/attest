@@ -403,7 +403,8 @@ fi
 
 # The canonical tree (1.5.0): the `canon` line and its key, unless the
 # repository opted out (`set planExempt off`) or git failed at any step. A
-# producer that cannot compute it says nothing, and the block is as before.
+# producer that cannot compute it says why and attaches no `canon` line; the
+# block is otherwise as before.
 canon_oid=
 plan_exempt_off "$object_tree"
 case $? in
