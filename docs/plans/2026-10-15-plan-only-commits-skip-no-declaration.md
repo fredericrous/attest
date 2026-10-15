@@ -161,6 +161,7 @@ Phase 1 (this repository, no tag): the canonical-tree route in `verify.sh`, `git
 - 2026-10-15 — **Quoted listing, not NUL records.** The canonical fingerprint hashes `git -c core.quotePath=true ls-tree -r --full-tree` with the oid of regular files under the top-level `docs/plans/` zeroed, not the `-z` listing the plan names. BSD awk reads a NUL record separator as paragraph mode and mawk's behaviour differs; the quoted form is injective (one record per line), needs no NUL-capable awk, and the shell signer, the Rust verifier and the test oracle all compute it. The awk known-answer self-test and its `canon unavailable` stderr line fall away with it. A quoted plan path is recognised by its unescaped prefix `"docs/plans/`.
 - 2026-10-15 — **A tree-ref deletion no longer revokes a plans-only skip.** The canonical block lives in the inputs ref, so SPEC "Revoking" says to delete both refs. The mirror fixtures in `tests/sign.sh` use a repository opted out of the canonical route to keep testing the tree ref alone.
 - 2026-10-15 — **Audit scope.** Step 4 covers every consumer of `attest@v1` (the GitHub repositories too: amont, attest, and any other pinned to the floating alias), not only the sixteen Forgejo repositories, because tagging 1.5.0 moves `v1` for all of them.
+- 2026-10-15 — **CI's shellcheck is newer than the local one.** It flagged SC2015 (`A && B || C`) in the canon fallback of `sign/sign.sh`; rewritten without it (93f75d4), reviewed again (approve).
 
 
 <!-- panel: repos=attest,amont,decisions reviewers=backend body-sha=1156cc02d5b7 -->
