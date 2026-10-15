@@ -148,4 +148,19 @@ as under the exact-tree skip today, and are reported, not held.
 - Rollback: `set planExempt off` per repository; or ignore `canon` (old verifiers do);
   or revert the attest release (the alias job moves `v1` back with a new tag).
 
+## Implementation review
+
+approve after a Delta and a one-comment confirmation. Round 1 (83k tokens, 112 s): 3 medium, 2 low, all fixed: the opt-out is now tested through the tree key and HEAD^2; `plan_exempt_off` has three states so the log says "cannot read amont.conf"; a failed canonical fingerprint is said, not swallowed; the canonical key is named only when it covered a gate. Delta (77k, 44 s) and confirmation (95k, 74 s): resolved.
+
+## Outcome
+
+Phase 1 (this repository, no tag): the canonical-tree route in `verify.sh`, `git-attest` and `sign/sign.sh`; SPEC "Canonical tree"; conformance 185/186, sign 148, compat including a frozen 1.4.1 verifier. Next: amont 1.56.0 (pointer plan in that repository), the audit, the pilot proofs, then the tag on the proven sha.
+
+## Decision log
+
+- 2026-10-15 — **Quoted listing, not NUL records.** The canonical fingerprint hashes `git -c core.quotePath=true ls-tree -r --full-tree` with the oid of regular files under the top-level `docs/plans/` zeroed, not the `-z` listing the plan names. BSD awk reads a NUL record separator as paragraph mode and mawk's behaviour differs; the quoted form is injective (one record per line), needs no NUL-capable awk, and the shell signer, the Rust verifier and the test oracle all compute it. The awk known-answer self-test and its `canon unavailable` stderr line fall away with it. A quoted plan path is recognised by its unescaped prefix `"docs/plans/`.
+- 2026-10-15 — **A tree-ref deletion no longer revokes a plans-only skip.** The canonical block lives in the inputs ref, so SPEC "Revoking" says to delete both refs. The mirror fixtures in `tests/sign.sh` use a repository opted out of the canonical route to keep testing the tree ref alone.
+- 2026-10-15 — **Audit scope.** Step 4 covers every consumer of `attest@v1` (the GitHub repositories too: amont, attest, and any other pinned to the floating alias), not only the sixteen Forgejo repositories, because tagging 1.5.0 moves `v1` for all of them.
+
+
 <!-- panel: repos=attest,amont,decisions reviewers=backend body-sha=1156cc02d5b7 -->
