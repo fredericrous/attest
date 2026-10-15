@@ -889,11 +889,126 @@ pub fn input_fp<'a>(payload: &'a str, gate: &str) -> Option<&'a str> {
     })
 }
 
+/// Does this `amont.conf` say `set planExempt off`? One tolerant reading,
+/// shared with amont and `verify.sh`: strip CR, trim blanks, split on blanks,
+/// and compare the three words `set`, `planExempt` and `off` ASCII
+/// case-insensitively. A line that is not exactly those three words (a
+/// trailing comment, another value) does not match; any match anywhere is off.
+pub fn conf_says_plan_exempt_off(bytes: &[u8]) -> bool {
+    bytes.split(|&b| b == b'\n').any(|line| {
+        let line: Vec<u8> = line.iter().copied().filter(|&b| b != b'\r').collect();
+        let words: Vec<&[u8]> = line
+            .split(|&b| b == b' ' || b == b'\t')
+            .filter(|w| !w.is_empty())
+            .collect();
+        words.len() == 3
+            && words[0].eq_ignore_ascii_case(b"set")
+            && words[1].eq_ignore_ascii_case(b"planExempt")
+            && words[2].eq_ignore_ascii_case(b"off")
+    })
+}
+
+/// Is the canonical route switched off for `tree`? Read from the bytes of
+/// `tree:amont.conf` itself, never through amont's trust-gated settings: `off`
+/// only narrows, so it is honoured whoever wrote it. Fails narrow: a failing
+/// `ls-tree`, or a listed `amont.conf` whose blob cannot be read, is off; only
+/// a successful `ls-tree` that does not list the file means on.
+pub fn plan_exempt_off(root: &Path, tree: &str) -> bool {
+    let Some(listing) =
+        git::stdout_bytes_in(root, &["ls-tree", "--full-tree", tree, "--", "amont.conf"])
+    else {
+        return true;
+    };
+    if listing.is_empty() {
+        return false;
+    }
+    match git::stdout_bytes_in(root, &["cat-file", "blob", &format!("{tree}:amont.conf")]) {
+        Some(bytes) => conf_says_plan_exempt_off(&bytes),
+        None => true,
+    }
+}
+
+/// The canonical text of an `ls-tree -r --full-tree` listing (paths quoted by
+/// `core.quotePath=true`, so one record is one line): the same lines, except
+/// that a regular file (`100644`, `100755`) under the top-level `docs/plans/`
+/// has its oid replaced by zeros of the same length. Existence stays; content
+/// does not count. Symlinks and gitlinks are never neutralised. `None` for an
+/// empty or malformed listing.
+pub fn canon_text(listing: &str) -> Option<String> {
+    let mut out = String::with_capacity(listing.len());
+    for line in listing.lines() {
+        let (head, path) = line.split_once('\t')?;
+        let mut f = head.split(' ');
+        let (mode, kind, oid) = (f.next()?, f.next()?, f.next()?);
+        if f.next().is_some() {
+            return None;
+        }
+        // A quoted path keeps its first characters: `"docs/plans/...`.
+        let under_plans = path.starts_with("docs/plans/") || path.starts_with("\"docs/plans/");
+        if matches!(mode, "100644" | "100755") && under_plans {
+            out.push_str(&format!(
+                "{mode} {kind} {}\t{path}\n",
+                "0".repeat(oid.len())
+            ));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The canonical fingerprint of `tree`: `canon_text` of its listing, hashed
+/// with `git hash-object`. `None` when git fails at any step.
+pub fn canon(root: &Path, tree: &str) -> Option<String> {
+    let listing = git::stdout_bytes_in(
+        root,
+        &[
+            "-c",
+            "core.quotePath=true",
+            "ls-tree",
+            "-r",
+            "--full-tree",
+            tree,
+        ],
+    )?;
+    let text = canon_text(std::str::from_utf8(&listing).ok()?)?;
+    git::stdout_with_input_in(root, &["hash-object", "--stdin"], text.as_bytes())
+        .filter(|s| is_oid(s))
+}
+
+/// The bytes the canonical key is hashed from.
+pub fn canon_key_preimage(canon: &str) -> String {
+    format!("amont-attest-canon {canon}\n")
+}
+
+/// The synthetic note key for a canonical fingerprint, in the inputs ref.
+pub fn canon_key(root: &Path, canon: &str) -> Option<String> {
+    git::stdout_with_input_in(
+        root,
+        &["hash-object", "--stdin"],
+        canon_key_preimage(canon).as_bytes(),
+    )
+    .filter(|s| is_oid(s))
+}
+
+/// The canonical fingerprint a block claims: a `canon <oid>` line of exactly
+/// two blank-separated fields, first occurrence wins. A malformed oid is not
+/// a claim.
+pub fn canon_claim(payload: &str) -> Option<&str> {
+    payload.split('\n').find_map(|line| {
+        let f: Vec<&str> = line.split([' ', '\t']).filter(|t| !t.is_empty()).collect();
+        (f.len() == 2 && f[0] == "canon" && is_oid(f[1])).then(|| f[1])
+    })
+}
+
 /// The uniform rule, as a pure function: a gate of a verified block is
-/// covered if the block's tree IS the checked-out tree, or if the block claims
-/// a fingerprint for that gate equal to the one computed here.
+/// covered if the block's tree IS the checked-out tree, or its canonical tree
+/// is the checked-out one's, or if the block claims a fingerprint for that gate
+/// equal to the one computed here.
 pub fn covered_gates<'a>(
     tree_matches: bool,
+    canon_matches: bool,
     gates: &'a str,
     fp_of_block: impl Fn(&str) -> Option<&'a str>,
     mut fp_head: impl FnMut(&str) -> Option<String>,
@@ -901,6 +1016,7 @@ pub fn covered_gates<'a>(
     let mut out = Vec::new();
     for g in gates.split_whitespace() {
         let ok = tree_matches
+            || canon_matches
             || match (fp_of_block(g), fp_head(g)) {
                 (Some(claimed), Some(here)) => claimed == here,
                 _ => false,
@@ -923,6 +1039,8 @@ struct Judge<'a> {
     anywhere: &'a [String],
     spec: Option<Spec>,
     fp_memo: Vec<(String, Option<String>)>,
+    canon_memo: Option<Option<String>>,
+    canon_used: bool,
     covered: Vec<String>,
     trail: Vec<String>,
     seen_notes: Vec<String>,
@@ -944,6 +1062,25 @@ impl Judge<'_> {
             .and_then(|s| fingerprint(&self.root, &self.head_tree, s, gate));
         self.fp_memo.push((gate.to_string(), fp.clone()));
         fp
+    }
+
+    /// The canonical fingerprint of the checked-out tree, computed once; `None`
+    /// when the repository opted out (`set planExempt off`) or git failed.
+    fn canon_here(&mut self) -> Option<String> {
+        if let Some(c) = &self.canon_memo {
+            return c.clone();
+        }
+        let c = if plan_exempt_off(&self.root, &self.head_tree) {
+            push_reason(
+                &mut self.trail,
+                "planExempt is off here; canonical trees are not used".into(),
+            );
+            None
+        } else {
+            canon(&self.root, &self.head_tree)
+        };
+        self.canon_memo = Some(c.clone());
+        c
     }
 
     /// Judge every block of the note on `object` in `notes_ref`.
@@ -1054,8 +1191,20 @@ impl Judge<'_> {
             // or the block's fingerprint for that gate is the one computed
             // here.
             let tree_matches = tree == self.head_tree;
+            // The canonical tree, for a block of another tree that claims
+            // one: asked of the checked-out tree, so a block filed under
+            // several keys is judged the same wherever it is first met.
+            let canon_matches = !tree_matches
+                && match (
+                    canon_claim(payload),
+                    canon_claim(payload).and_then(|_| self.canon_here()),
+                ) {
+                    (Some(claimed), Some(here)) => claimed == here,
+                    _ => false,
+                };
             let kept = covered_gates(
                 tree_matches,
+                canon_matches,
                 gates,
                 |g| input_fp(payload, g),
                 |g| self.fp_head(g),
@@ -1064,14 +1213,19 @@ impl Judge<'_> {
                 push_reason(
                     &mut self.trail,
                     format!(
-                        "attested tree {tree} is not the checked-out tree {} and no input fingerprint of {where_} matches",
+                        "attested tree {tree} is not the checked-out tree {} and neither its canonical tree nor an input fingerprint of {where_} matches",
                         self.head_tree
                     ),
                 );
                 continue;
             }
+            if canon_matches {
+                self.canon_used = true;
+            }
             let how = if tree_matches {
                 ""
+            } else if canon_matches {
+                " (by canonical tree)"
             } else {
                 " (by input fingerprint)"
             };
@@ -1238,6 +1392,8 @@ pub fn evaluate(
         anywhere,
         spec,
         fp_memo: Vec::new(),
+        canon_memo: None,
+        canon_used: false,
         covered: Vec::new(),
         trail,
         seen_notes: Vec::new(),
@@ -1286,6 +1442,22 @@ pub fn evaluate(
         let at = format!("input {gate} {}", &fp[..12]);
         for r in &refs_inputs {
             judge.judge(r, &k, &label(r, &at));
+        }
+    }
+
+    // Last, the canonical-tree key: one more note lookup, for a block signed
+    // on another tree whose canonical form is this one's.
+    if !judge.exhausted {
+        if let Some(c) = judge.canon_here() {
+            if let Some(k) = canon_key(&judge.root, &c) {
+                let at = format!("canon {}", &c[..12]);
+                for r in &refs_inputs {
+                    judge.judge(r, &k, &label(r, &at));
+                }
+                if judge.canon_used {
+                    push_reason(&mut judge.trail, format!("canonical tree {c}, key {k}"));
+                }
+            }
         }
     }
 
@@ -1577,17 +1749,107 @@ mod tests {
         };
         // tree matches: every gate, fingerprints irrelevant
         assert_eq!(
-            covered_gates(true, "g1 g2 g3", fp, head),
+            covered_gates(true, false, "g1 g2 g3", fp, head),
             ["g1", "g2", "g3"]
         );
         // tree differs: only a gate whose claimed fp equals the one here
-        assert_eq!(covered_gates(false, "g1 g2 g3", fp, head), ["g1"]);
+        assert_eq!(covered_gates(false, false, "g1 g2 g3", fp, head), ["g1"]);
         // a claim for a gate not in `gates` buys nothing
         assert_eq!(
-            covered_gates(false, "g2 g3", fp, head),
+            covered_gates(false, false, "g2 g3", fp, head),
             Vec::<String>::new()
         );
         // duplicates in `gates` are listed once
-        assert_eq!(covered_gates(true, "g1 g1", fp, head), ["g1"]);
+        assert_eq!(covered_gates(true, false, "g1 g1", fp, head), ["g1"]);
+        // the canonical tree equal: every gate, fingerprints irrelevant
+        assert_eq!(
+            covered_gates(false, true, "g1 g2 g3", fp, head),
+            ["g1", "g2", "g3"]
+        );
+    }
+
+    const O1: &str = "1111111111111111111111111111111111111111";
+    const O2: &str = "2222222222222222222222222222222222222222";
+    const Z: &str = "0000000000000000000000000000000000000000";
+
+    #[test]
+    fn canon_text_neutralises_plan_content_and_keeps_everything_else() {
+        let a = format!(
+            "100644 blob {O1}\tREADME.md\n100644 blob {O1}\tdocs/plans/a.md\n100755 blob {O1}\tdocs/plans/sub/run.sh\n"
+        );
+        let edited = a.replace(
+            &format!("{O1}\tdocs/plans/a.md"),
+            &format!("{O2}\tdocs/plans/a.md"),
+        );
+        // editing a plan changes nothing
+        assert_eq!(canon_text(&a), canon_text(&edited));
+        assert!(canon_text(&a)
+            .unwrap()
+            .contains(&format!("100644 blob {Z}\tdocs/plans/a.md\n")));
+        // any other path's content, a plan's existence, a rename: all change it
+        let other = a.replace(&format!("{O1}\tREADME.md"), &format!("{O2}\tREADME.md"));
+        assert_ne!(canon_text(&a), canon_text(&other));
+        let added = format!("{a}100644 blob {O1}\tdocs/plans/b.md\n");
+        assert_ne!(canon_text(&a), canon_text(&added));
+        let renamed = a.replace("docs/plans/a.md", "docs/plans/c.md");
+        assert_ne!(canon_text(&a), canon_text(&renamed));
+    }
+
+    #[test]
+    fn canon_text_exempts_only_the_top_level_docs_plans_of_regular_files() {
+        let nested = format!("100644 blob {O1}\tx/docs/plans/a.md\n");
+        assert!(canon_text(&nested).unwrap().contains(O1));
+        let near = format!("100644 blob {O1}\tdocs/plans-old/a.md\n100644 blob {O1}\tdocs/plans\n");
+        assert!(canon_text(&near).unwrap().contains(O1));
+        // a symlink or a gitlink under docs/plans keeps its oid
+        let link = format!("120000 blob {O1}\tdocs/plans/l\n160000 commit {O1}\tdocs/plans/m\n");
+        assert_eq!(canon_text(&link).unwrap(), link);
+        // a quoted path (newline, quote, non-ASCII) is still recognised
+        let quoted = format!("100644 blob {O1}\t\"docs/plans/a\\nb.md\"\n");
+        assert!(canon_text(&quoted).unwrap().contains(Z));
+        // sha256 object ids are neutralised to 64 zeros
+        let long = format!("100644 blob {}\tdocs/plans/a.md\n", "a".repeat(64));
+        assert!(canon_text(&long).unwrap().contains(&"0".repeat(64)));
+        // empty or malformed listings are no answer
+        assert_eq!(canon_text(""), None);
+        assert_eq!(canon_text("garbage\n"), None);
+    }
+
+    #[test]
+    fn the_opt_out_is_one_tolerant_reading() {
+        for yes in [
+            "set planExempt off\n",
+            "SET PLANEXEMPT OFF",
+            "  set\tplanExempt   off  \r\n",
+            "gate x\nset planExempt off\ngate y\n",
+            "set planExempt on\nset planExempt off\n",
+            "set planExempt off\nset planExempt on\n",
+        ] {
+            assert!(conf_says_plan_exempt_off(yes.as_bytes()), "{yes:?}");
+        }
+        for no in [
+            "",
+            "set planExempt on\n",
+            "set planExempt off # trailing comment\n",
+            "# set planExempt off\n",
+            "set planExempt\n",
+            "set planExempt off off\n",
+            "setplanExempt off\n",
+            "set planexempt of\n",
+        ] {
+            assert!(!conf_says_plan_exempt_off(no.as_bytes()), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn a_canon_claim_is_two_fields_and_a_real_oid() {
+        let p = format!("amont-attest-v2\ncanon {O1}\namont x\n");
+        assert_eq!(canon_claim(&p), Some(O1));
+        assert_eq!(canon_claim(&format!("canon {O1} extra\n")), None);
+        assert_eq!(canon_claim("canon xyz\n"), None);
+        assert_eq!(canon_claim("canon\n"), None);
+        // first occurrence wins
+        assert_eq!(canon_claim(&format!("canon {O1}\ncanon {O2}\n")), Some(O1));
+        assert_eq!(canon_key_preimage(O1), format!("amont-attest-canon {O1}\n"));
     }
 }

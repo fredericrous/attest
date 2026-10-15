@@ -13,11 +13,13 @@
 # behaviour, so the same fixtures also pin what 1.3.0 adds. `fp13` is a 1.3.x
 # verifier: it reads fingerprints, but not a spec with an optional `?path`
 # (1.4.0), which it rejects as a wildcard — so such a spec only loses skips.
+# `fp14` is a 1.4.x verifier: it reads optional paths, but not the `canon` line
+# of 1.5.0, which it ignores — so a canonical claim only loses a skip.
 set -u
 
 # shellcheck disable=SC2034  # read by lib.sh
-IMPL=${1:?usage: compat-fields.sh <implementation command> old|fp13|new}
-AGE=${2:?usage: compat-fields.sh <implementation command> old|fp13|new}
+IMPL=${1:?usage: compat-fields.sh <implementation command> old|fp13|fp14|new}
+AGE=${2:?usage: compat-fields.sh <implementation command> old|fp13|fp14|new}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 # The helper is sourced, which shellcheck follows only under -x; the hook
@@ -68,7 +70,7 @@ EOF
 fp=$(fp_of "$R" test)
 attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
 move_tree "$R"
-if [ "$AGE" = new ]; then
+if [ "$AGE" = new ] || [ "$AGE" = fp14 ]; then
     check "a spec with an optional path is read" "test" "$R"
 else
     check "a spec with an optional path covers nothing here" "" "$R"
@@ -86,5 +88,28 @@ fp=$(fp_of "$R" test)
 attach_note "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key"
 move_tree "$R"
 check "a moved tree with the block under the old tree only: nothing" "" "$R"
+
+# The canonical tree (1.5.0): a `canon` line is an unknown field to every
+# older verifier. A block that carries one is reported by tree exactly as
+# before; one reachable only through its canonical key is found by 1.5.0 and
+# by nobody older, so an old verifier only loses the skip, never gains one.
+make_repo "$R" signer@example.org "$WORK/key"
+mkdir -p "$R/docs/plans"; echo p > "$R/docs/plans/a.md"; echo c > "$R/code.txt"
+git -C "$R" add -A; git -C "$R" commit -q -m src
+c=$(canon_fp "$R")
+attach_note "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c")" "$WORK/key"
+check "a tree-matching block with a canon line is reported" "test" "$R"
+
+make_repo "$R" signer@example.org "$WORK/key"
+mkdir -p "$R/docs/plans"; echo p > "$R/docs/plans/a.md"; echo c > "$R/code.txt"
+git -C "$R" add -A; git -C "$R" commit -q -m src
+c=$(canon_fp "$R")
+attach_canon "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c")" "$WORK/key" "$c"
+echo edited > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+if [ "$AGE" = new ]; then
+    check "a block reachable only by its canonical tree is reported" "test" "$R"
+else
+    check "a block reachable only by its canonical tree is not reported" "" "$R"
+fi
 
 summary

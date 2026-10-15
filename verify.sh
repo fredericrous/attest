@@ -405,6 +405,55 @@ detect_platform() {
 # platform-table:end
 [ -n "$platform" ] || platform=$(detect_platform)
 
+# canon-block:start
+# The canonical tree (1.5.0). SPEC.md, "Canonical tree". The fingerprint of a
+# tree in which the CONTENT of every regular file under the top-level
+# `docs/plans/` is not counted but its EXISTENCE is: `ls-tree -r --full-tree`
+# (paths quoted, so a record is a line), the oid of those files zeroed,
+# hashed. Needs only a POSIX awk. Kept byte-identical in verify.sh and
+# sign/sign.sh; `make lint` checks that. Both read $tmp and, if set, $root.
+
+# Does tree $1 opt out of the canonical route (`set planExempt off` in its
+# amont.conf)? One tolerant reading shared with git-attest and amont: strip CR,
+# trim blanks, compare the three words case-insensitively; any match is off.
+# Fails narrow: a failing ls-tree, or an amont.conf that is listed but cannot
+# be read, is off; only a successful ls-tree that lists nothing means on.
+plan_exempt_off() {
+    local listing
+    listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 0
+    [ -n "$listing" ] || return 1
+    git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 0
+    LC_ALL=C awk '{
+        gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        if (split($0, w, /[ \t]+/) == 3 && tolower(w[1]) == "set" && tolower(w[2]) == "planexempt" && tolower(w[3]) == "off") found = 1
+    } END { exit !found }' "$tmp/amont.conf"
+}
+
+# The canonical fingerprint of tree $1, or nothing when git fails at any step
+# or the listing is empty: a listing that ended early must never fingerprint.
+canon_of() {
+    git -C "${root:-.}" -c core.quotePath=true ls-tree -r --full-tree "$1" > "$tmp/canon.list" 2> /dev/null || return 1
+    [ -s "$tmp/canon.list" ] || return 1
+    LC_ALL=C awk '
+        function bad() { failed = 1; exit 1 }
+        {
+            t = index($0, "\t"); if (t == 0) bad()
+            head = substr($0, 1, t - 1); path = substr($0, t + 1)
+            if (split(head, h, " ") != 3) bad()
+            if ((h[1] == "100644" || h[1] == "100755") && (substr(path, 1, 11) == "docs/plans/" || substr(path, 1, 12) == "\"docs/plans/")) {
+                z = ""; for (i = length(h[3]); i > 0; i--) z = z "0"
+                print h[1] " " h[2] " " z "\t" path
+            } else print $0
+        }
+        END { exit failed }' "$tmp/canon.list" > "$tmp/canon.txt" || return 1
+    [ -s "$tmp/canon.txt" ] || return 1
+    git -C "${root:-.}" hash-object --stdin < "$tmp/canon.txt" 2> /dev/null
+}
+
+# The synthetic note key for canonical fingerprint $1, in the inputs ref.
+canon_key() { printf 'amont-attest-canon %s\n' "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
+# canon-block:end
+
 # No suffix after the Xs: stock macOS mktemp does not substitute a template
 # whose Xs are not at the very end. It creates the literal name, and the next
 # run finds it there and fails with "File exists" — so one killed run on a
@@ -640,6 +689,29 @@ input_fp() {
 # The synthetic note key for (gate, fingerprint).
 input_key() { printf 'amont-attest-input %s %s\n' "$1" "$2" | git hash-object --stdin 2> /dev/null; }
 
+# The checked-out tree's canonical fingerprint, memoised in "$tmp/canon.here":
+# the oid, or an empty file when the route is unavailable here (the repository
+# opted out, or git failed). canon_here prints it.
+canon_here() {
+    if [ ! -f "$tmp/canon.here" ]; then
+        : > "$tmp/canon.here"
+        if plan_exempt_off "$head_tree"; then
+            note "planExempt is off here; canonical trees are not used"
+        else
+            canon_of "$head_tree" > "$tmp/canon.here" 2> /dev/null || : > "$tmp/canon.here"
+        fi
+    fi
+    cat "$tmp/canon.here"
+}
+
+# The canonical fingerprint a block claims: a `canon <oid>` line of exactly two
+# fields and a real oid, first occurrence wins.
+canon_claim() {
+    printf '%s\n' "$1" | awk \
+        'NF == 2 && $1 == "canon" && $2 ~ /^[0-9a-f]+$/ && (length($2) == 40 || length($2) == 64) { print $2; exit }'
+}
+canon_used=
+
 # Can gate $1 be covered by fingerprint at all? Only a name the spec grammar
 # allows, `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, because only such a name can be
 # declared there — and only such a name is safe in "$tmp/fp.$g". The classes
@@ -680,7 +752,7 @@ kept_gates() {
 # HEAD, whichever note it appears in).
 covered=; seen=; seen_blocks=; tried=; verifications=0; exhausted=
 judge_note() {
-    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted
+    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here
     [ -z "$exhausted" ] || return 0
     note_oid=$(git notes --ref "$nref" list "$object" 2> /dev/null) || return 0
     note_oid=${note_oid%% *}
@@ -767,14 +839,26 @@ judge_note() {
         }
 
         # The uniform rule, per gate: the tree is the checked-out tree, or the
-        # block's fingerprint for that gate is the one computed here.
+        # block's canonical tree is the checked-out one's, or the block's
+        # fingerprint for that gate is the one computed here. The canonical
+        # tree is asked of the checked-out tree whichever key found the block.
+        canon_ok=
+        if [ "$tree" != "$head_tree" ]; then
+            claimed=$(canon_claim "$payload")
+            if [ -n "$claimed" ]; then
+                here=$(canon_here)
+                [ -n "$here" ] && [ "$claimed" = "$here" ] && canon_ok=1
+            fi
+        fi
         if [ "$tree" = "$head_tree" ]; then
             kept=$(kept_gates yes "$gates" "$payload"); how=
+        elif [ -n "$canon_ok" ]; then
+            kept=$(kept_gates yes "$gates" "$payload"); how=" (by canonical tree)"; canon_used=1
         else
             kept=$(kept_gates no "$gates" "$payload"); how=" (by input fingerprint)"
         fi
         if [ -z "$kept" ]; then
-            note "attested tree $tree is not the checked-out tree $head_tree and no input fingerprint of $where matches"
+            note "attested tree $tree is not the checked-out tree $head_tree and neither its canonical tree nor an input fingerprint of $where matches"
             continue
         fi
 
@@ -831,6 +915,21 @@ if [ -n "$spec_ok" ]; then
             judge_note "$r" "$k" "$(label "$r" "input $g $(printf '%s' "$fp" | cut -c1-12)")"
         done
     done < "$tmp/spec.gates"
+fi
+
+# Last, the canonical-tree key: one more note lookup, for a block signed on
+# another tree whose canonical form is this one's.
+if [ -z "$exhausted" ]; then
+    c=$(canon_here)
+    if [ -n "$c" ]; then
+        k=$(canon_key "$c")
+        if [ -n "$k" ]; then
+            for r in $refs_inputs; do
+                judge_note "$r" "$k" "$(label "$r" "canon $(printf '%s' "$c" | cut -c1-12)")"
+            done
+            [ -z "$canon_used" ] || note "canonical tree $c, key $k"
+        fi
+    fi
 fi
 
 [ -n "$tried" ] || note "no attestation found for tree $head_tree"

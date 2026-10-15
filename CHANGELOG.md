@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.5.0
+
+Plan-only commits skip with no declaration.
+
+- **The canonical tree.** A producer adds `canon <oid>`, the fingerprint of the
+  tree with the *content* of everything under the top-level `docs/plans/` left
+  out and its *existence* kept, and files the block under a second synthetic
+  key in `refs/notes/amont-attest-inputs`. A verifier covers every gate of a
+  block whose `canon` equals the checked-out tree's, reported as
+  `(by canonical tree)`. Nothing is declared, so nothing can be
+  under-declared; `verify.sh` and `git-attest` agree on the same vectors.
+- **Opt-out.** `set planExempt off` in `amont.conf`, read by every producer and
+  verifier from the committed bytes and failing narrow, for a repository whose
+  gate reads the contents of a plan.
+- Additive: the format token stays `amont-attest-v2`; older verifiers ignore
+  the new line and only lose a skip. `make lint` keeps the shell block
+  byte-identical in `verify.sh` and `sign/sign.sh`.
+
 ## 1.4.1
 
 Two defects in 1.4.0's remote calls, found while bringing amont to parity.

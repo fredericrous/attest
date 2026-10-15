@@ -628,6 +628,163 @@ attach_note "$R" "$(payload_for "$R" 'pre-push-*' "$PLATFORM")" "$WORK/key"
 check "a wildcard gate name is not expanded against the working tree" 'pre-push-*' "$R"
 check "...nor when admitted by --anywhere" 'pre-push-*' "$R" --platform s390x-aix --anywhere 'pre-push-*'
 
+# --- the canonical tree (1.5.0) ---------------------------------------------
+# A block that claims the canonical fingerprint of the checked-out tree covers
+# every gate of the block, with nothing declared. The canonical tree leaves out
+# the CONTENT of the regular files under the top-level docs/plans/ and keeps
+# their existence. Every fixture attests the base, then moves the tree, so the
+# tree route answers nothing; the block is filed under Kc only.
+
+canon_repo() { # [amont.conf content]
+    make_repo "$R" signer@example.org "$WORK/key"
+    mkdir -p "$R/src" "$R/docs/plans" "$R/x/docs/plans"
+    echo 'fn main() {}' > "$R/src/main.rs"
+    printf 'plan one\n' > "$R/docs/plans/a.md"; printf 'plan two\n' > "$R/docs/plans/b.md"
+    printf 'nested\n' > "$R/x/docs/plans/n.md"
+    if [ $# -gt 0 ]; then printf '%b' "$1" > "$R/amont.conf"; fi
+    git -C "$R" add -A; git -C "$R" commit -q -m src
+}
+# Attest `gates` for the HEAD tree under Kc of its canonical fingerprint.
+attest_canon() { # [gates] [platform]
+    local c; c=$(canon_fp "$R")
+    attach_canon "$R" "$(payload_for "$R" "${1:-test lint}" "${2:-$PLATFORM}" | with_canon "$c")" "$WORK/key" "$c"
+}
+reason_in() { # dir  -> $ERR
+    # shellcheck disable=SC2046,SC2086  # the command line word-splits on purpose
+    ERR=$(cd "$1" && set -- $(explain_impl) && "$@" 2>&1 > /dev/null < /dev/null)
+}
+
+canon_repo; attest_canon
+printf 'plan one, rewritten at the end of the branch\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: a plan edited, nothing declared: every gate of the block" "test lint" "$R"
+check "canon: from a subdirectory, the same answer" "test lint" "$R/src"
+reason_in "$R"
+case $ERR in *"(by canonical tree)"*) ok "canon: the reason names the canonical route" ;; *) fail "canon: the reason names the canonical route" "$ERR" ;; esac
+case $ERR in *"key $(canon_key "$R" "$(canon_fp "$R")")"*) ok "canon: ...and the key" ;; *) fail "canon: ...and the key" "$ERR" ;; esac
+
+canon_repo; attest_canon
+printf 'fn main() { changed }\n' > "$R/src/main.rs"; git -C "$R" commit -qam code
+check "canon: another file changed: nothing" "" "$R"
+
+canon_repo; attest_canon
+printf 'plan three\n' > "$R/docs/plans/c.md"; git -C "$R" add -A; git -C "$R" commit -qm plan-add
+check "canon: a plan added: nothing (existence counts)" "" "$R"
+
+canon_repo; attest_canon
+git -C "$R" rm -q docs/plans/b.md; git -C "$R" commit -qm plan-del
+check "canon: a plan deleted: nothing" "" "$R"
+
+canon_repo; attest_canon
+git -C "$R" mv docs/plans/b.md docs/plans/renamed.md; git -C "$R" commit -qm plan-mv
+check "canon: a plan renamed: nothing" "" "$R"
+
+canon_repo; attest_canon
+printf 'nested, edited\n' > "$R/x/docs/plans/n.md"; git -C "$R" commit -qam nested
+check "canon: a nested x/docs/plans/ is not exempt: nothing" "" "$R"
+
+canon_repo
+printf 'old\n' > "$R/docs/plansx.md"; git -C "$R" add -A; git -C "$R" commit -qm near
+attest_canon
+printf 'new\n' > "$R/docs/plansx.md"; git -C "$R" commit -qam near2
+check "canon: docs/plansx.md is not under docs/plans/: nothing" "" "$R"
+
+# A symlink or a gitlink under docs/plans/ is bound by its oid, never neutralised.
+canon_repo
+b1=$(printf 'a.md' | git -C "$R" hash-object -w --stdin); b2=$(printf 'b.md' | git -C "$R" hash-object -w --stdin)
+git -C "$R" update-index --add --cacheinfo "120000,$b1,docs/plans/link"; git -C "$R" commit -qm link
+attest_canon
+git -C "$R" update-index --cacheinfo "120000,$b2,docs/plans/link"; git -C "$R" commit -qm link2
+check "canon: a symlink under docs/plans retargeted: nothing" "" "$R"
+canon_repo
+g1=$(git -C "$R" rev-parse HEAD); g2=$(git -C "$R" rev-parse 'HEAD^{tree}')
+git -C "$R" update-index --add --cacheinfo "160000,$g1,docs/plans/sub"; git -C "$R" commit -qm gitlink
+attest_canon
+git -C "$R" update-index --cacheinfo "160000,$g2,docs/plans/sub"; git -C "$R" commit -qm gitlink2
+check "canon: a gitlink under docs/plans moved: nothing" "" "$R"
+
+# A path that needs quoting is still recognised as a plan file.
+canon_repo
+odd="$R/docs/plans/odd name'q.md"
+printf 'odd\n' > "$odd"; git -C "$R" add -A; git -C "$R" commit -qm odd
+attest_canon
+printf 'odd again\n' > "$odd"; git -C "$R" commit -qam odd2
+check "canon: a quoted plan path is neutralised too" "test lint" "$R"
+
+# The claim, not the tree, is what is checked.
+canon_repo
+attach_canon "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$(printf 'a%.0s' $(seq 40))")" "$WORK/key" "$(canon_fp "$R")"
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: a block under Kc claiming another canon: nothing" "" "$R"
+canon_repo
+attach_canon "$R" "$(payload_for "$R" test "$PLATFORM")" "$WORK/key" "$(canon_fp "$R")"
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: a block under Kc with no canon line: nothing" "" "$R"
+canon_repo
+c=$(canon_fp "$R")
+attach_canon "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c" | sed "s/^canon $c\$/canon $c junk/")" "$WORK/key" "$c"
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: a canon line with a third field is not a claim" "" "$R"
+canon_repo
+c=$(canon_fp "$R")
+attach_canon "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c")" "$WORK/other" "$c"
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: a block signed by a stranger: nothing" "" "$R"
+canon_repo
+c=$(canon_fp "$R")
+body=$(sign_block "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c")" "$WORK/key")
+note_in amont-attest-inputs "$R" "$(printf '%s' "$body" | sed 's/^gates test$/gates test lint/')" "$(canon_key "$R" "$c")"
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: gates edited after signing: nothing" "" "$R"
+
+# Platform and --anywhere compose with the canonical route.
+canon_repo; attest_canon test s390x-aix
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: foreign platform: nothing by default" "" "$R"
+check "canon: foreign platform, --anywhere test: covered" "test" "$R" --anywhere test
+
+# A block filed under the commit key, from a tree that is not this one, is
+# judged by the same rule.
+canon_repo
+c=$(canon_fp "$R"); old=$(git -C "$R" rev-parse HEAD)
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+attach_note "$R" "$(payload_for "$R" test "$PLATFORM" | sed "s/^tree .*/tree $(git -C "$R" rev-parse "$old^{tree}")/" | with_canon "$c")" "$WORK/key" "$(git -C "$R" rev-parse HEAD)"
+check "canon: found through the commit key, still by the canonical tree" "test" "$R"
+
+# The opt-out: `set planExempt off` in the committed amont.conf.
+for conf in 'set planExempt off\n' 'SET   PLANEXEMPT\tOFF\r\n' 'gate x\n\nset planExempt on\nset planExempt off\n' 'set planExempt off\nset planExempt on\n'; do
+    canon_repo "$conf"; attest_canon
+    printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+    check "canon: opted out ($(printf '%s' "$conf" | tr -d '\r' | tr '\n\t' '|  ')): nothing" "" "$R"
+done
+for conf in 'set planExempt on\n' 'set planExempt off # because\n' '# set planExempt off\n' 'set planExempt\n' 'gate x\n'; do
+    canon_repo "$conf"; attest_canon
+    printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+    check "canon: not opted out ($(printf '%s' "$conf" | tr '\n' '|')): covered" "test lint" "$R"
+done
+# An amont.conf that is listed but cannot be read as a blob (here a directory)
+# fails narrow: off.
+make_repo "$R" signer@example.org "$WORK/key"
+mkdir -p "$R/docs/plans" "$R/amont.conf"; echo p > "$R/docs/plans/a.md"; echo x > "$R/amont.conf/inner"
+git -C "$R" add -A; git -C "$R" commit -qm src
+attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: amont.conf listed but unreadable: off, nothing" "" "$R"
+# ...and the opt-out reaches a canon claim through every route, not only Kc:
+# the HEAD commit key and the tree key are judged by the same policy.
+canon_repo 'set planExempt off\n'
+c=$(canon_fp "$R"); old=$(git -C "$R" rev-parse 'HEAD^{tree}')
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+forged=$(payload_for "$R" test "$PLATFORM" | sed "s/^tree .*/tree $old/" | with_canon "$(canon_fp "$R")")
+attach_note "$R" "$forged" "$WORK/key" "$(git -C "$R" rev-parse HEAD)"
+check "canon: opted out, claim found through the commit key: nothing" "" "$R"
+attach_canon "$R" "$forged" "$WORK/key" "$(canon_fp "$R")"
+check "canon: opted out, claim found through Kc too: nothing" "" "$R"
+
+# The tree route is unchanged by all of this.
+canon_repo
+attach_note "$R" "$(payload_for "$R" "test lint" "$PLATFORM")" "$WORK/key"
+check "canon: a block with no canon line, tree equal: still covered" "test lint" "$R"
+
 # --- the JSON shape the actions publish ------------------------------------
 if [ "${SKIP_JSON:-}" != 1 ]; then
     make_repo "$R" signer@example.org "$WORK/key"

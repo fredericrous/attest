@@ -254,6 +254,42 @@ raw_input_note() { # dir content gate fp
     git -C "$dir" notes --ref amont-attest-inputs add -f -C "$blob" "$k" 2> /dev/null
 }
 
+# --- the canonical tree (1.5.0) ---------------------------------------------
+
+# The canonical fingerprint of the HEAD tree (or `tree`), as SPEC.md defines
+# it — the fixture-side reference, independent of both verifiers: the quoted
+# listing with the oid of every regular file under docs/plans/ zeroed.
+canon_fp() { # dir [tree]
+    local dir=$1 tree=${2:-}
+    [ -n "$tree" ] || tree=$(git -C "$dir" rev-parse 'HEAD^{tree}')
+    git -C "$dir" -c core.quotePath=true ls-tree -r --full-tree "$tree" | LC_ALL=C awk '{
+        t = index($0, "\t"); head = substr($0, 1, t - 1); path = substr($0, t + 1)
+        split(head, h, " ")
+        if ((h[1] == "100644" || h[1] == "100755") && (substr(path, 1, 11) == "docs/plans/" || substr(path, 1, 12) == "\"docs/plans/")) {
+            z = ""; for (i = length(h[3]); i > 0; i--) z = z "0"
+            print h[1] " " h[2] " " z "\t" path
+        } else print $0
+    }' | git -C "$dir" hash-object --stdin
+}
+
+# A payload with a `canon` line, from stdin to stdout, before the `amont` line.
+with_canon() { # canon-oid
+    ATTEST_C=$1 awk '/^amont / { print "canon " ENVIRON["ATTEST_C"] } { print }'
+}
+
+# The synthetic note key for a canonical fingerprint.
+canon_key() { # dir canon
+    printf 'amont-attest-canon %s\n' "$2" | git -C "$1" hash-object --stdin
+}
+
+# A signed block APPENDED under Kc(canon) in the inputs ref.
+attach_canon() { # dir payload keyfile canon
+    local dir=$1 payload=$2 keyfile=$3 k
+    k=$(canon_key "$dir" "$4")
+    git -C "$dir" notes --ref amont-attest-inputs append \
+        -m "$(sign_block "$dir" "$payload" "$keyfile")" "$k" 2> /dev/null
+}
+
 # Like `check`, with a git that fails on purpose (tests/fault/git) first on
 # PATH. Both implementations spawn `git` from PATH — except the Rust binary
 # on Windows, whose process launcher will not run an extension-less script;
