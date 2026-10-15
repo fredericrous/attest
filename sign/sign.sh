@@ -230,13 +230,15 @@ detect_platform() {
 # Does tree $1 opt out of the canonical route (`set planExempt off` in its
 # amont.conf)? One tolerant reading shared with git-attest and amont: strip CR,
 # trim blanks, compare the three words case-insensitively; any match is off.
-# Fails narrow: a failing ls-tree, or an amont.conf that is listed but cannot
-# be read, is off; only a successful ls-tree that lists nothing means on.
+# Exit 0: off. Exit 1: on, which only a successful ls-tree that lists no
+# amont.conf means. Exit 2: unreadable, a failing ls-tree or an amont.conf that
+# is listed but cannot be read; fails narrow, so callers treat it as off and
+# only the log differs.
 plan_exempt_off() {
     local listing
-    listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 0
+    listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 2
     [ -n "$listing" ] || return 1
-    git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 0
+    git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 2
     LC_ALL=C awk '{
         gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
         if (split($0, w, /[ \t]+/) == 3 && tolower(w[1]) == "set" && tolower(w[2]) == "planexempt" && tolower(w[3]) == "off") found = 1
@@ -403,14 +405,15 @@ fi
 # repository opted out (`set planExempt off`) or git failed at any step. A
 # producer that cannot compute it says nothing, and the block is as before.
 canon_oid=
-if plan_exempt_off "$object_tree"; then
-    say "planExempt is off here; no canonical tree"
-elif canon_oid=$(canon_of "$object_tree") && [ -n "$canon_oid" ]; then
-    :
-else
-    canon_oid=
-    say "cannot compute the canonical tree; none attached"
-fi
+plan_exempt_off "$object_tree"
+case $? in
+    0) say "planExempt is off here; no canonical tree" ;;
+    1) canon_oid=$(canon_of "$object_tree") && [ -n "$canon_oid" ] || {
+           canon_oid=
+           say "cannot compute the canonical tree; none attached"
+       } ;;
+    *) say "cannot read amont.conf; no canonical tree" ;;
+esac
 
 # The payload, in the exact shape SPEC.md gives — the `input` lines after
 # `platform`, then `canon`, before `amont`, in spec order, so a re-run is

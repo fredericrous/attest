@@ -416,13 +416,15 @@ detect_platform() {
 # Does tree $1 opt out of the canonical route (`set planExempt off` in its
 # amont.conf)? One tolerant reading shared with git-attest and amont: strip CR,
 # trim blanks, compare the three words case-insensitively; any match is off.
-# Fails narrow: a failing ls-tree, or an amont.conf that is listed but cannot
-# be read, is off; only a successful ls-tree that lists nothing means on.
+# Exit 0: off. Exit 1: on, which only a successful ls-tree that lists no
+# amont.conf means. Exit 2: unreadable, a failing ls-tree or an amont.conf that
+# is listed but cannot be read; fails narrow, so callers treat it as off and
+# only the log differs.
 plan_exempt_off() {
     local listing
-    listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 0
+    listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 2
     [ -n "$listing" ] || return 1
-    git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 0
+    git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 2
     LC_ALL=C awk '{
         gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
         if (split($0, w, /[ \t]+/) == 3 && tolower(w[1]) == "set" && tolower(w[2]) == "planexempt" && tolower(w[3]) == "off") found = 1
@@ -695,11 +697,15 @@ input_key() { printf 'amont-attest-input %s %s\n' "$1" "$2" | git hash-object --
 canon_here() {
     if [ ! -f "$tmp/canon.here" ]; then
         : > "$tmp/canon.here"
-        if plan_exempt_off "$head_tree"; then
-            note "planExempt is off here; canonical trees are not used"
-        else
-            canon_of "$head_tree" > "$tmp/canon.here" 2> /dev/null || : > "$tmp/canon.here"
-        fi
+        plan_exempt_off "$head_tree"
+        case $? in
+            0) note "planExempt is off here; canonical trees are not used" ;;
+            1) canon_of "$head_tree" > "$tmp/canon.here" 2> /dev/null || {
+                   : > "$tmp/canon.here"
+                   note "cannot compute the canonical tree; canonical trees are not used"
+               } ;;
+            *) note "cannot read amont.conf; canonical trees are not used" ;;
+        esac
     fi
     cat "$tmp/canon.here"
 }
@@ -853,7 +859,7 @@ judge_note() {
         if [ "$tree" = "$head_tree" ]; then
             kept=$(kept_gates yes "$gates" "$payload"); how=
         elif [ -n "$canon_ok" ]; then
-            kept=$(kept_gates yes "$gates" "$payload"); how=" (by canonical tree)"; canon_used=1
+            kept=$(kept_gates yes "$gates" "$payload"); how=" (by canonical tree)"
         else
             kept=$(kept_gates no "$gates" "$payload"); how=" (by input fingerprint)"
         fi
@@ -868,11 +874,13 @@ judge_note() {
         # ran; `--anywhere` says it of the named gates only.
         if platform_matches "$platform" "$ran_on"; then
             covered=$(union "$covered" "$kept")
+            [ -z "$canon_ok" ] || canon_used=1
             note "covered by $signer on $ran_on$how: $kept"
             continue
         fi
         accepted=$(intersect "$kept" "$anywhere")
         covered=$(union "$covered" "$accepted")
+        [ -z "$canon_ok" ] || [ -z "$accepted" ] || canon_used=1
         if [ -n "$accepted" ]; then
             note "attested on $ran_on by $signer$how, this leg is $platform; accepted anywhere: $accepted"
         else

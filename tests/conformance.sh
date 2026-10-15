@@ -780,6 +780,48 @@ check "canon: opted out, claim found through the commit key: nothing" "" "$R"
 attach_canon "$R" "$forged" "$WORK/key" "$(canon_fp "$R")"
 check "canon: opted out, claim found through Kc too: nothing" "" "$R"
 
+# ...through the tree key (a block whose tree field is not the checked-out one)
+# and through HEAD^2 (a pull request's merge commit), opted out or not.
+for conf in 'set planExempt off\n' ''; do
+    label=$([ -n "$conf" ] && echo "opted out" || echo "not opted out")
+    want=$([ -n "$conf" ] && echo "" || echo "test")
+    canon_repo "$conf"
+    old=$(git -C "$R" rev-parse 'HEAD^{tree}')
+    printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+    forged=$(payload_for "$R" test "$PLATFORM" | sed "s/^tree .*/tree $old/" | with_canon "$(canon_fp "$R")")
+    attach_note "$R" "$forged" "$WORK/key"
+    check "canon: $label, claim found through the tree key: ${want:-nothing}" "$want" "$R"
+
+    canon_repo "$conf"
+    base=$(git -C "$R" rev-parse HEAD); old=$(git -C "$R" rev-parse 'HEAD^{tree}')
+    git -C "$R" checkout -q -b side
+    printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+    side=$(git -C "$R" rev-parse HEAD)
+    git -C "$R" checkout -q "$base"; git -C "$R" merge -q --no-ff -m merge side
+    forged=$(payload_for "$R" test "$PLATFORM" | sed "s/^tree .*/tree $old/" | with_canon "$(canon_fp "$R")")
+    attach_note "$R" "$forged" "$WORK/key" "$side"
+    check "canon: $label, claim found through HEAD^2: ${want:-nothing}" "$want" "$R"
+done
+
+# The reasons for a route that is not used are said, not swallowed.
+canon_repo 'set planExempt off\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+reason_in "$R"
+case $ERR in *"planExempt is off here"*) ok "canon: opted out says so" ;; *) fail "canon: opted out says so" "$ERR" ;; esac
+make_repo "$R" signer@example.org "$WORK/key"
+mkdir -p "$R/docs/plans" "$R/amont.conf"; echo p > "$R/docs/plans/a.md"; echo x > "$R/amont.conf/inner"
+git -C "$R" add -A; git -C "$R" commit -qm src
+attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+reason_in "$R"
+case $ERR in *"cannot read amont.conf"*) ok "canon: an unreadable amont.conf says so" ;; *) fail "canon: an unreadable amont.conf says so" "$ERR" ;; esac
+
+# The reason names a canonical key only when the canonical tree covered something.
+canon_repo; attest_canon test s390x-aix
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+reason_in "$R"
+case $ERR in *"canonical tree "*", key "*) fail "canon: a foreign-platform block covers nothing and names no key" "$ERR" ;; *) ok "canon: a foreign-platform block covers nothing and names no key" ;; esac
+
 # The tree route is unchanged by all of this.
 canon_repo
 attach_note "$R" "$(payload_for "$R" "test lint" "$PLATFORM")" "$WORK/key"

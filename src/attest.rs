@@ -908,23 +908,35 @@ pub fn conf_says_plan_exempt_off(bytes: &[u8]) -> bool {
     })
 }
 
+/// What `tree:amont.conf` says about the canonical route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanExempt {
+    /// A successful `ls-tree` that lists no `amont.conf`, or one without the
+    /// `set planExempt off` line.
+    On,
+    /// The committed `amont.conf` opts out.
+    Off,
+    /// A failing `ls-tree`, or a listed `amont.conf` whose blob cannot be
+    /// read. Fails narrow: callers treat it as off; only the log differs.
+    Unreadable,
+}
+
 /// Is the canonical route switched off for `tree`? Read from the bytes of
 /// `tree:amont.conf` itself, never through amont's trust-gated settings: `off`
-/// only narrows, so it is honoured whoever wrote it. Fails narrow: a failing
-/// `ls-tree`, or a listed `amont.conf` whose blob cannot be read, is off; only
-/// a successful `ls-tree` that does not list the file means on.
-pub fn plan_exempt_off(root: &Path, tree: &str) -> bool {
+/// only narrows, so it is honoured whoever wrote it.
+pub fn plan_exempt(root: &Path, tree: &str) -> PlanExempt {
     let Some(listing) =
         git::stdout_bytes_in(root, &["ls-tree", "--full-tree", tree, "--", "amont.conf"])
     else {
-        return true;
+        return PlanExempt::Unreadable;
     };
     if listing.is_empty() {
-        return false;
+        return PlanExempt::On;
     }
     match git::stdout_bytes_in(root, &["cat-file", "blob", &format!("{tree}:amont.conf")]) {
-        Some(bytes) => conf_says_plan_exempt_off(&bytes),
-        None => true,
+        Some(bytes) if conf_says_plan_exempt_off(&bytes) => PlanExempt::Off,
+        Some(_) => PlanExempt::On,
+        None => PlanExempt::Unreadable,
     }
 }
 
@@ -1070,14 +1082,31 @@ impl Judge<'_> {
         if let Some(c) = &self.canon_memo {
             return c.clone();
         }
-        let c = if plan_exempt_off(&self.root, &self.head_tree) {
-            push_reason(
-                &mut self.trail,
-                "planExempt is off here; canonical trees are not used".into(),
-            );
-            None
-        } else {
-            canon(&self.root, &self.head_tree)
+        let c = match plan_exempt(&self.root, &self.head_tree) {
+            PlanExempt::Off => {
+                push_reason(
+                    &mut self.trail,
+                    "planExempt is off here; canonical trees are not used".into(),
+                );
+                None
+            }
+            PlanExempt::Unreadable => {
+                push_reason(
+                    &mut self.trail,
+                    "cannot read amont.conf; canonical trees are not used".into(),
+                );
+                None
+            }
+            PlanExempt::On => {
+                let c = canon(&self.root, &self.head_tree);
+                if c.is_none() {
+                    push_reason(
+                        &mut self.trail,
+                        "cannot compute the canonical tree; canonical trees are not used".into(),
+                    );
+                }
+                c
+            }
         };
         self.canon_memo = Some(c.clone());
         c
@@ -1219,9 +1248,6 @@ impl Judge<'_> {
                 );
                 continue;
             }
-            if canon_matches {
-                self.canon_used = true;
-            }
             let how = if tree_matches {
                 ""
             } else if canon_matches {
@@ -1234,6 +1260,7 @@ impl Judge<'_> {
             // evidence about the Windows leg of a matrix.
             if platform_matches(self.require_platform, ran_on) {
                 union(&mut self.covered, kept.iter().map(String::as_str));
+                self.canon_used |= canon_matches;
                 push_reason(
                     &mut self.trail,
                     format!("covered by {signer} on {ran_on}{how}: {kept_str}"),
@@ -1246,6 +1273,7 @@ impl Judge<'_> {
                 .filter(|g| self.anywhere.iter().any(|a| a == g))
                 .collect();
             union(&mut self.covered, accepted.iter().copied());
+            self.canon_used |= canon_matches && !accepted.is_empty();
             let want = self.require_platform.unwrap_or("any");
             let mut reason = format!("attested on {ran_on} by {signer}{how}, this leg is {want}");
             if !accepted.is_empty() {
