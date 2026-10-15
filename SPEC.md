@@ -572,3 +572,79 @@ producer for CI. What a producer owes this format:
   hook's command to the CI step that trusts it: a gate called
   `pre-push-cargo-test` that ran `cargo test --lib` covers a CI step running
   `cargo test --workspace` in name only. Same name, same command.
+
+## `amont-provenance-v1`
+
+A second, separate note (decisions ADR-0036): a signed record of what a push
+carried besides its tests — the plan it implements and the verdicts given
+on it. It is **not** an attestation. CI never reads it, and nothing in this
+repository's verifier does; it is specified here because amont produces it
+with the same key and the same publishing rules, and because amont-agent
+writes the payload amont signs.
+
+```
+amont-provenance-v1
+commit 9f1c2ab0d6e4c1b2a3f405e6d7c8b9a0f1e2d3c4
+tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+canon 1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c
+patch 7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d
+plan docs/plans/2026-10-15-provenance-recorded-at-the-push.md 031240153fa4ecee3f2f1f7e1ab3eae5403dd1990dbc1b104b8c6569069944cd
+review reviewed 1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c
+preview not-required
+producer amont-agent 2.43.0
+
+-----BEGIN SSH SIGNATURE-----
+…
+-----END SSH SIGNATURE-----
+```
+
+Payload and signature are separated exactly as in an attestation block (the
+payload's trailing newline is signed), fields are read **by prefix**, the
+first occurrence wins, and an unknown line is ignored.
+
+| line | meaning |
+|---|---|
+| `amont-provenance-v1` | format token, always first; any other value means absent |
+| `commit <oid>` | the pushed commit |
+| `tree <oid>` | its full tree |
+| `canon <oid>` | its canonical tree (see "Canonical tree") |
+| `patch <id>` | optional: `git diff --binary <merge-base(origin/main, commit)> <commit> -- . ':!docs/plans'` piped to `git patch-id --verbatim`; omitted when it cannot be computed |
+| `plan <path> <body-sha>` | the plan file in `tree` and its body-sha (`amont-agent plan-sha`) |
+| `review <how> <canon>` | `reviewed`, `by-patch` (the hook's `reviewed-by-patch`) or `overruled`, and the canonical tree the review read |
+| `preview <outcome>` | `approved`, `evidence` or `not-required` |
+| `producer <name> <version>` | who wrote the payload, informational |
+
+`commit`, `tree`, `plan` and `review` are required.
+
+**Where it lives.** `refs/notes/amont-provenance`, one or more blocks per
+object, keyed by the **tree** and by the **commit**, as attestations are, and
+published by the same append-and-push loop ("Producing"). The signature's
+ssh-keygen namespace is `amont-provenance`, never `amont-attest`: a
+provenance block can never be replayed as an attestation, and an
+`allowed_signers` entry accepts it only once it lists that namespace
+(`namespaces="amont-attest,amont-provenance"`).
+
+**The handoff.** amont-agent writes the unsigned payload to
+`<config dir>/amont-agent/provenance/<repo>/<commit>`, where `<config dir>`
+is `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`, else `%USERPROFILE%\.claude`
+(amont-agent's `settings::config_dir`), and `<repo>` is spelled as in amont-agent's
+`implementation-review/by-tree/<repo>/`: the name of the directory holding
+the repository's common git directory. Only amont-agent's hook writes there.
+amont's pre-push reads that one path — never a path a git config key could
+redirect — refuses a payload whose `tree` is not the pushed commit's tree,
+signs and publishes it, and deletes the file once published.
+
+**What the signature says, and no more.** This machine's amont-agent recorded
+these lines and amont checked `tree` against the pushed commit. A reader
+checks `plan` itself, against the plan file in `tree`. Nothing checks
+`review` and `preview`: only amont-agent's guard on its store protects them,
+and that guard is best-effort against a shell command that writes the file.
+Anyone holding the key can sign any payload, as for attestations.
+
+**Reading it.** A record whose `commit` is not reachable from origin is
+ignored: amont publishes before the push delivers, so a push that failed
+can leave a note behind. A record is found on the pull request's head
+commit, else on the merge commit's tree, else by its `patch` line. To match by
+`patch`, a reader hashes the merge commit's own change the same way: the
+diff from its first parent, `docs/plans` excluded, through `git patch-id
+--verbatim`.
