@@ -399,6 +399,78 @@ assert_eq "inputs: the local-only key survived" \
     "$(git -C "$R" notes --ref attest-local/amont-attest-inputs show "$(input_key "$R" ci-lint "$fp_lint")" 2> /dev/null | count_blocks)" 1
 assert_eq "inputs: the pushed key is there too" "$(remote_input_blocks ci-fmt "$fp_fmt")" 1
 
+# --- the canonical tree (1.5.0) ---------------------------------------------
+# The producer adds `canon <oid>` and files the block under Kc, with nothing
+# declared; a verifier then covers a plans-only change in a fresh clone. The
+# shell signer and the Rust verifier compute the fingerprint independently, so
+# this round trip is also the check that the two agree.
+canon_remote_repo() { # [amont.conf content]
+    make_remote_repo
+    mkdir -p "$R/docs/plans"; echo plan > "$R/docs/plans/a.md"
+    if [ $# -gt 0 ]; then printf '%b' "$1" > "$R/amont.conf"; fi
+    git -C "$R" add -A; git -C "$R" commit -q -m plans
+    git -C "$R" push -q origin HEAD:refs/heads/main
+}
+plan_edit() { echo "edited $RANDOM" >> "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit; git -C "$R" push -q origin HEAD:refs/heads/main; }
+remote_canon_blocks() { git --git-dir="$ORIGIN" notes --ref amont-attest-inputs show "$(canon_key "$R" "$1")" 2> /dev/null | count_blocks; }
+signed_payload() { git --git-dir="$ORIGIN" notes --ref amont-attest show "$(git -C "$R" rev-parse 'HEAD^{tree}')" 2> /dev/null | sed -n '/^amont-attest-v2$/,/^$/p'; }
+
+canon_remote_repo
+sign "$WORK/key" --gates "ci-fmt ci-lint"
+expect "canon: signs and pushes, nothing declared" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt ci-lint|inputs=0/0"
+c=$(canon_fp "$R")
+case $(signed_payload) in *"canon $c"*) ok "canon: the payload carries the canonical fingerprint" ;; *) fail "canon: the payload carries the canonical fingerprint" "$(signed_payload)" ;; esac
+assert_eq "canon: the block is under Kc" "$(remote_canon_blocks "$c")" 1
+plan_edit
+assert_eq "canon: a plan edited, a fresh clone covers both gates" "$(covered_in_clone)" "ci-fmt ci-lint"
+echo more >> "$R/docs/plans/a.md"; git -C "$R" commit -qam again; git -C "$R" push -q origin HEAD:refs/heads/main
+sign "$WORK/key" --gates "ci-fmt ci-lint"
+assert_eq "canon: signing again on the edited tree adds one block under Kc" "$(remote_canon_blocks "$c")" 2
+sign "$WORK/key" --gates "ci-fmt ci-lint"
+expect "canon: a re-run is byte-identical" 0 "status=already-present|signed=false|pushed=true|gates=ci-fmt ci-lint|inputs=0/0"
+assert_eq "canon: ...and adds nothing under Kc" "$(remote_canon_blocks "$c")" 2
+
+canon_remote_repo
+echo code > "$R/code.txt"; git -C "$R" add -A; git -C "$R" commit -qm code; git -C "$R" push -q origin HEAD:refs/heads/main
+sign "$WORK/key" --gates "ci-fmt"
+echo more >> "$R/code.txt"; git -C "$R" commit -qam code2; git -C "$R" push -q origin HEAD:refs/heads/main
+assert_eq "canon: another file changed, a fresh clone covers nothing" "$(covered_in_clone)" ""
+
+canon_remote_repo
+sign "$WORK/key" --gates "ci-fmt"
+printf 'plan three\n' > "$R/docs/plans/c.md"; git -C "$R" add -A; git -C "$R" commit -qm plan-add; git -C "$R" push -q origin HEAD:refs/heads/main
+assert_eq "canon: a plan added, a fresh clone covers nothing" "$(covered_in_clone)" ""
+
+# Opted out: no canon line, no Kc block, and nothing covered after a plan edit.
+canon_remote_repo 'SET planExempt OFF\r\n'
+sign "$WORK/key" --gates "ci-fmt"
+expect "canon: opted out still signs and pushes" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt|inputs=0/0"
+case $(signed_payload) in *"canon "*) fail "canon: opted out writes no canon line" "$(signed_payload)" ;; *) ok "canon: opted out writes no canon line" ;; esac
+assert_eq "canon: ...and no block under Kc" "$(remote_canon_blocks "$(canon_fp "$R")")" 0
+case $ERR in *"planExempt is off"*) ok "canon: ...and says why" ;; *) fail "canon: ...and says why" "$ERR" ;; esac
+plan_edit
+assert_eq "canon: opted out, a plan edited: a fresh clone covers nothing" "$(covered_in_clone)" ""
+
+# Local-only signing keeps the canonical block local, and --include-local reads it.
+canon_remote_repo
+sign "$WORK/key" --gates "ci-fmt" --no-push
+c=$(canon_fp "$R")
+assert_eq "canon: --no-push publishes nothing under Kc on origin" "$(remote_canon_blocks "$c")" 0
+plan_edit
+assert_eq "canon: ...and the unpushed block is read only on request" "$(cd "$R" && run_impl "$R"; printf '%s' "$GOT")" ""
+run_impl "$R" --include-local
+assert_eq "canon: --include-local covers the plan edit" "$GOT" "ci-fmt"
+
+# The mirror fixtures below are about the TREE ref's mechanics: a repository
+# opted out of the canonical route has no inputs ref until a spec makes one, so
+# `inputs_notes=absent` and "deleting the main ref revokes" keep their meaning.
+make_remote_repo_plain() {
+    make_remote_repo
+    printf 'set planExempt off\n' > "$R/amont.conf"
+    git -C "$R" add -A; git -C "$R" commit -q -m optout
+    git -C "$R" push -q origin HEAD:refs/heads/main
+}
+
 # --- origin's mirror (1.4.0) -------------------------------------------------
 # refs/notes/amont-attest[-inputs] follow origin, which is the only place an
 # attestation can be revoked. SPEC.md, "Lookup".
@@ -417,7 +489,7 @@ has_ref() { git -C "$1" rev-parse --verify --quiet "$2" > /dev/null 2>&1; }
 
 # Revocation: a pushed gate, then origin's ref deleted. The signer's clone and
 # a fresh one both cover nothing, and the signer's next push brings nothing back.
-make_remote_repo
+make_remote_repo_plain
 sign "$WORK/key" --gates ci-fmt
 git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest
 check "revoked on origin: the signer's clone covers nothing" "" "$R"
@@ -428,11 +500,11 @@ assert_eq "the signer's next push does not bring it back" "$(covered_in_clone)" 
 
 # A 1.3.1-style clone: its local ref holds what origin used to have, origin
 # has nothing. The mirror is deleted, loudly, with a restore command that works.
-make_remote_repo
+make_remote_repo_plain
 append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
 old=$(git -C "$R" rev-parse refs/notes/amont-attest)
 check "a stale mirror with nothing on origin covers nothing" "" "$R"
-make_remote_repo
+make_remote_repo_plain
 append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
 old=$(git -C "$R" rev-parse refs/notes/amont-attest)
 explain_in "$R"
@@ -442,7 +514,7 @@ git -C "$R" update-ref refs/notes/amont-attest "$old"
 assert_eq "...and the restore command brings the ref back" "$(git -C "$R" rev-parse refs/notes/amont-attest)" "$old"
 
 # Origin reachable, neither ref there: both absent, both mirrors deleted.
-make_remote_repo
+make_remote_repo_plain
 append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
 git -C "$R" notes --ref amont-attest-inputs add -m x HEAD 2> /dev/null
 assert_eq "origin with neither ref" "$(gha_in "$R")" "notes=absent inputs_notes=absent"
@@ -452,14 +524,14 @@ else
     ok "...both mirrors deleted"
 fi
 # Only the main ref on origin: that one fetched, the other absent.
-make_remote_repo
+make_remote_repo_plain
 sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
 git -C "$R" notes --ref amont-attest-inputs add -m x HEAD 2> /dev/null
 assert_eq "origin with only the main ref" "$(gha_in "$R")" "notes=fetched inputs_notes=absent"
 
 # Origin configured but unreachable: a populated mirror is NOT judged, and
 # the reason is exact (and identical in both implementations).
-make_remote_repo
+make_remote_repo_plain
 sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
 git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
 check "an unreachable origin: the mirror is not judged" "" "$R"
@@ -471,7 +543,7 @@ assert_eq "...with the exact reasons first" "$(printf '%s\n' "$ERR" | head -2)" 
 if has_ref "$R" refs/notes/amont-attest; then ok "...and the mirror is kept for when origin answers"; else fail "...and the mirror is kept" "deleted"; fi
 
 # An unpushed block beside an ignored one says how to include it.
-make_remote_repo
+make_remote_repo_plain
 sign "$WORK/key" --gates ci-fmt --no-push > /dev/null 2>&1
 explain_in "$R"
 case $ERR in *"attest: refs/notes/attest-local/amont-attest holds unpushed blocks, ignored without --include-local"*) ok "ignored unpushed blocks are named" ;; *) fail "ignored unpushed blocks are named" "$ERR" ;; esac
@@ -490,7 +562,7 @@ while True:
 ' > "$WORK/port" &
     listener=$!
     for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WORK/port" ] && break; sleep 1; done
-    make_remote_repo
+    make_remote_repo_plain
     git -C "$R" remote set-url origin "http://127.0.0.1:$(cat "$WORK/port")/repo.git"
     t0=$(date +%s)
     got=$(gha_in "$R")
@@ -511,7 +583,7 @@ case "$IMPL" in bash*) native= ;; *) native=1 ;; esac
 if [ -n "$native" ] && [ "$OS" = windows ]; then
     printf '  SKIP  a silent origin is cut off by the deadline (the faulty-git wrapper cannot reach a native binary on Windows)\n'
 else
-    make_remote_repo
+    make_remote_repo_plain
     mkdir -p "$WORK/fault"; tr -d '\r' < "$HERE/tests/fault/git" > "$WORK/fault/git"; chmod +x "$WORK/fault/git"
     sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
     : > "$WORK/calls"
@@ -550,7 +622,7 @@ while True:
 ' > "$WORK/port401" &
     listener=$!
     for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WORK/port401" ] && break; sleep 1; done
-    make_remote_repo
+    make_remote_repo_plain
     url="http://127.0.0.1:$(cat "$WORK/port401")/repo.git"
     git -C "$R" remote set-url origin "$url"
     printf '#!/bin/sh\ntouch "%s"\necho x\n' "$WORK/asked" > "$WORK/askpass"; chmod +x "$WORK/askpass"
@@ -570,7 +642,7 @@ fi
 # unchanged that copy IS origin's and is judged; once origin moves on (a new
 # block, or a rewrite revoking one) it is not, and the log says how to clear
 # the lock.
-make_remote_repo
+make_remote_repo_plain
 sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
 check "a mirror in sync covers" "ci-fmt" "$R"
 lock=$(git -C "$R" rev-parse --git-path refs/notes/amont-attest.lock); lock_abs=$R/$lock
@@ -590,7 +662,7 @@ assert_eq "lock removed: origin's copy is the mirror again" "$(gha_in "$R")" "no
 if [ "$OS" = windows ]; then
     printf '  SKIP  a dead run'"'"'s throwaway is swept (no liveness check on Windows)\n'
 else
-make_remote_repo
+make_remote_repo_plain
 sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
 git -C "$R" update-ref refs/attest-tmp/4194305/amont-attest HEAD
 git -C "$R" update-ref "refs/attest-tmp/$$/amont-attest" HEAD
@@ -603,7 +675,7 @@ fi
 # The two implementations say the same thing, line for line, about an origin
 # that does not answer. ATTEST_GIT_ATTEST names the binary (Makefile sets it).
 if [ -n "${ATTEST_GIT_ATTEST:-}" ] && [ -x "$ATTEST_GIT_ATTEST" ]; then
-    make_remote_repo
+    make_remote_repo_plain
     sign "$WORK/key" --gates ci-fmt > /dev/null 2>&1
     git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
     sh_err=$(cd "$R" && bash "$VERIFY" 2>&1 > /dev/null < /dev/null)
@@ -615,7 +687,7 @@ fi
 
 # Never a prompt: every remote call runs with prompts off and ssh in batch
 # mode. The faulty-git wrapper records what fetch and ls-remote saw.
-make_remote_repo
+make_remote_repo_plain
 git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
 if [ -n "$native" ] && [ "$OS" = windows ]; then
     printf '  SKIP  remote calls never prompt (the faulty-git wrapper cannot reach a native binary on Windows)\n'
@@ -631,7 +703,7 @@ fi
 # The mirror cannot be deleted (a read-only .git): it is not judged either.
 # The premise is checked first — root, reftable and packed refs all delete
 # anyway — and the case says SKIP rather than passing for the wrong reason.
-make_remote_repo
+make_remote_repo_plain
 append_note "$R" "$(payload_for "$R" ci-fmt "$PLATFORM")" "$WORK/key"
 git -C "$R" update-ref refs/notes/attest-scratch HEAD
 restore_perm() { chmod u+w "$R/.git/refs/notes" 2> /dev/null; }
@@ -646,5 +718,16 @@ else
 fi
 restore_perm
 trap 'rm -rf "$WORK"' EXIT
+
+# --- revoking a canonical skip (1.5.0) ---------------------------------------
+# The canonical block lives in the inputs ref, so deleting the tree ref alone no
+# longer revokes a plans-only skip; deleting the inputs ref does.
+canon_remote_repo
+sign "$WORK/key" --gates "ci-fmt"
+plan_edit
+git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest
+assert_eq "canon: the tree ref deleted alone: the canonical skip stands" "$(covered_in_clone)" "ci-fmt"
+git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest-inputs
+assert_eq "canon: the inputs ref deleted too: nothing" "$(covered_in_clone)" ""
 
 summary

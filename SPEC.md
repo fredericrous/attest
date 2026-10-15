@@ -45,6 +45,8 @@ single most common way to get an implementation wrong.
 | `tree <oid>` | the git tree the checks ran against |
 | `gates <names…>` | space-separated names of checks that **passed**. Never empty in a valid note. |
 | `platform <arch>-<os>` | where they ran, e.g. `x86_64-linux`, `aarch64-macos`, `x86_64-windows` |
+| `input <gate> <fp>` | optional; see "Input fingerprints" |
+| `canon <oid>` | optional; see "Canonical tree" |
 | `amont <version>` | the producer version, informational |
 
 `tree`, `gates` and `platform` are **required**. A v2 payload missing any of
@@ -331,6 +333,68 @@ at most 64 signatures per invocation over all candidates — one verification
 being one call of its verify routine — and says so when the budget is spent.
 Because the budget is shared, the visit order is part of the contract.
 
+### Canonical tree
+
+Input fingerprints need a declaration in every repository. The one
+declaration nearly every repository would make is "everything except what a
+branch's plan commits touch", so since 1.5.0 that is computed from the tree
+itself, with nothing to declare and nothing to keep complete.
+
+**Definition.** The canonical form of tree `T` is the listing of
+`git -c core.quotePath=true ls-tree -r --full-tree T` (paths quoted, so one
+record is one line, ending in LF) with one change: in every record whose
+mode is `100644` or `100755` and whose path starts with the top-level
+`docs/plans/`, the object id is replaced by zeros of the same length (40 or
+64). Mode and type are kept, so the **existence** of a plan file counts and
+its **content** does not. Symlink (`120000`) and gitlink (`160000`) records
+stay byte for byte. A nested `x/docs/plans/` and a file or directory merely
+named `docs/plans-…` are not exempt. A quoted path is recognised by its
+unescaped prefix `"docs/plans/`. `canon(T)` is `git hash-object --stdin` of
+that text. If `ls-tree` exits non-zero, writes nothing, or writes a record that
+is not `<mode> <type> <oid>TAB<path>`, there is no `canon(T)`.
+
+Editing a plan leaves `canon` unchanged; adding, deleting or renaming a plan
+file, or changing any other path, changes it.
+
+**Opt-out.** A repository whose gate reads the contents of a plan sets
+`set planExempt off` in `amont.conf`. Every producer and verifier reads that
+one policy, `plan_exempt_off(T)`, from the bytes of `T:amont.conf` itself:
+strip CR, trim blanks, split on blanks, compare the words `set`, `planExempt`
+and `off` ASCII case-insensitively; a line that is not exactly those three
+words does not match, and any match anywhere is off. It fails narrow: an
+`ls-tree` that fails, or a listed `amont.conf` that cannot be read, is off;
+only a successful `ls-tree` that does not list the file is on. When off, a
+producer writes no `canon` line and no canonical key, and a verifier ignores
+canonical equality in every block, whichever key found it.
+
+**The payload line.** `canon <oid>`: exactly two blank-separated fields and
+an oid of 40 or 64 lowercase hex digits, after the `input` lines and before
+`amont`; the first occurrence wins. Verifiers before 1.5.0 ignore it (fields
+are read by prefix), so an old verifier only loses a skip.
+
+**The key.** `Kc(c)` is `git hash-object --stdin` over exactly the bytes
+`amont-attest-canon <c>\n`, in the same second ref, `refs/notes/amont-attest-inputs`;
+there is no third ref to mirror.
+
+**The rule.** A gate of a verified block is covered when the block's tree is
+the checked-out tree, **or** the block's `canon` equals `canon` of the
+checked-out tree (every gate of the block), **or** its input fingerprint for
+that gate equals the one computed here. The canonical tree is asked of the
+checked-out tree, so a block filed under several keys is judged the same
+wherever it is first met. Signature, principal, platform and `anywhere` rules
+apply unchanged, after the signature verifies. A gate covered this way is
+reported as `(by canonical tree)`, and the canonical fingerprint and `Kc`
+are named once.
+
+**Lookup.** After the object-keyed candidates and the input-fingerprint keys,
+one more: `Kc` in the inputs ref, in the order "Which refs are read" gives. It
+shares the 64-verification budget, last in the visit order.
+
+**What it does not bind.** A gate that reads the contents of a plan (a
+formatter or linter over the whole tree, a link checker) would be skipped on a
+plans-only change; such a repository opts out. Existence is bound, so a check
+that a cited plan exists is re-run when one is added, deleted or renamed.
+
 ### Which refs are read
 
 Origin is the only place an attestation can be revoked — by deleting or
@@ -419,13 +483,16 @@ attestation can be withdrawn.
 
 ### Revoking
 
-- **Every fingerprint skip at once:** `git push origin
+- **Every fingerprint and canonical skip at once:** `git push origin
   :refs/notes/amont-attest-inputs`. A 1.4.0 verifier deletes its mirror on
   its next run and prints how to restore it; nothing is covered by
   fingerprint until producers sign again. Keep the old oid first —
   `git ls-remote origin refs/notes/amont-attest-inputs` — and `git push
   origin <oid>:refs/notes/amont-attest-inputs` restores it.
 - **Tree-keyed attestations too:** the same for `refs/notes/amont-attest`.
+  Since 1.5.0 a producer files its block under `Kc` in the inputs ref as well,
+  so deleting the tree ref alone leaves a plans-only skip standing: delete
+  both to revoke everything.
 - **One gate:** rename it — in the spec, the hook and the workflow. No note
   names the new gate, so nothing old covers it.
 - **A signer:** remove the key from `allowed_signers` and revoke the refs as

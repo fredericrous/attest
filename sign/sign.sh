@@ -41,6 +41,11 @@
 # skipped because it was already attested — and re-signing a skipped gate
 # would launder another platform's result into this one).
 #
+# Since 1.5.0 the block also carries `canon <oid>`, the canonical fingerprint of
+# the tree with the content of docs/plans/ left out, and is filed under its key
+# in the inputs ref too (SPEC.md, "Canonical tree"), unless `set planExempt off`
+# is committed in amont.conf.
+#
 # Depends on `git` and `ssh-keygen` only. See SPEC.md, "Producing".
 #
 # `-f`: no filesystem globbing, for the same reason as verify.sh — gate names
@@ -66,7 +71,7 @@ while [ $# -gt 0 ]; do
         --allow-dirty)  allow_dirty=1; shift ;;
         --github-output) gha=1;       shift ;;
         --quiet)     quiet=1;         shift ;;
-        -h|--help)   sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)   sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'sign.sh: unknown argument %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -214,6 +219,57 @@ detect_platform() {
 # platform-table:end
 [ -n "$platform" ] || platform=$(detect_platform)
 
+# canon-block:start
+# The canonical tree (1.5.0). SPEC.md, "Canonical tree". The fingerprint of a
+# tree in which the CONTENT of every regular file under the top-level
+# `docs/plans/` is not counted but its EXISTENCE is: `ls-tree -r --full-tree`
+# (paths quoted, so a record is a line), the oid of those files zeroed,
+# hashed. Needs only a POSIX awk. Kept byte-identical in verify.sh and
+# sign/sign.sh; `make lint` checks that. Both read $tmp and, if set, $root.
+
+# Does tree $1 opt out of the canonical route (`set planExempt off` in its
+# amont.conf)? One tolerant reading shared with git-attest and amont: strip CR,
+# trim blanks, compare the three words case-insensitively; any match is off.
+# Exit 0: off. Exit 1: on, which only a successful ls-tree that lists no
+# amont.conf means. Exit 2: unreadable, a failing ls-tree or an amont.conf that
+# is listed but cannot be read; fails narrow, so callers treat it as off and
+# only the log differs.
+plan_exempt_off() {
+    local listing
+    listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 2
+    [ -n "$listing" ] || return 1
+    git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 2
+    LC_ALL=C awk '{
+        gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        if (split($0, w, /[ \t]+/) == 3 && tolower(w[1]) == "set" && tolower(w[2]) == "planexempt" && tolower(w[3]) == "off") found = 1
+    } END { exit !found }' "$tmp/amont.conf"
+}
+
+# The canonical fingerprint of tree $1, or nothing when git fails at any step
+# or the listing is empty: a listing that ended early must never fingerprint.
+canon_of() {
+    git -C "${root:-.}" -c core.quotePath=true ls-tree -r --full-tree "$1" > "$tmp/canon.list" 2> /dev/null || return 1
+    [ -s "$tmp/canon.list" ] || return 1
+    LC_ALL=C awk '
+        function bad() { failed = 1; exit 1 }
+        {
+            t = index($0, "\t"); if (t == 0) bad()
+            head = substr($0, 1, t - 1); path = substr($0, t + 1)
+            if (split(head, h, " ") != 3) bad()
+            if ((h[1] == "100644" || h[1] == "100755") && (substr(path, 1, 11) == "docs/plans/" || substr(path, 1, 12) == "\"docs/plans/")) {
+                z = ""; for (i = length(h[3]); i > 0; i--) z = z "0"
+                print h[1] " " h[2] " " z "\t" path
+            } else print $0
+        }
+        END { exit failed }' "$tmp/canon.list" > "$tmp/canon.txt" || return 1
+    [ -s "$tmp/canon.txt" ] || return 1
+    git -C "${root:-.}" hash-object --stdin < "$tmp/canon.txt" 2> /dev/null
+}
+
+# The synthetic note key for canonical fingerprint $1, in the inputs ref.
+canon_key() { printf 'amont-attest-canon %s\n' "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
+# canon-block:end
+
 # ---------------------------------------------------------------------------
 # Input fingerprints (1.3.0). SPEC.md, "Input fingerprints". The same reading
 # of the same spec as verify.sh, kept identical by hand — the twin comment is
@@ -345,13 +401,27 @@ if [ -s "$tmp/absent" ]; then
     say "optional paths absent (their absence is bound): $(sort -u "$tmp/absent" | tr '\n' ' ' | sed 's/ $//')"
 fi
 
+# The canonical tree (1.5.0): the `canon` line and its key, unless the
+# repository opted out (`set planExempt off`) or git failed at any step. A
+# producer that cannot compute it says why and attaches no `canon` line; the
+# block is otherwise as before.
+canon_oid=
+plan_exempt_off "$object_tree"
+case $? in
+    0) say "planExempt is off here; no canonical tree" ;;
+    1) canon_oid=$(canon_of "$object_tree") || canon_oid=
+       [ -n "$canon_oid" ] || say "cannot compute the canonical tree; none attached" ;;
+    *) say "cannot read amont.conf; no canonical tree" ;;
+esac
+
 # The payload, in the exact shape SPEC.md gives — the `input` lines after
-# `platform`, before `amont`, in spec order, so a re-run is byte-identical —
-# then the block: payload, its trailing newline, a blank line, the armored
-# signature.
+# `platform`, then `canon`, before `amont`, in spec order, so a re-run is
+# byte-identical — then the block: payload, its trailing newline, a blank
+# line, the armored signature.
 {
     printf '%s\ntree %s\ngates %s\nplatform %s\n' "$FORMAT" "$object_tree" "$gates" "$platform"
     while IFS="$(printf '\t')" read -r g fp; do printf 'input %s %s\n' "$g" "$fp"; done < "$tmp/fps"
+    [ -z "$canon_oid" ] || printf 'canon %s\n' "$canon_oid"
     printf 'amont %s\n' "$producer"
 } > "$tmp/p"
 ssh-keygen -Y sign -n "$NAMESPACE" -f "$tmp/key" "$tmp/p" > /dev/null 2>&1 || {
@@ -432,11 +502,13 @@ publish_local() { # ref object...
     [ -n "$appended" ] && echo local || echo already-present
 }
 
-# The keys of the inputs ref: one per fingerprinted gate.
+# The keys of the inputs ref: one per fingerprinted gate, then the canonical
+# tree's, when the block carries one.
 input_keys() {
     while IFS="$(printf '\t')" read -r g fp; do
         printf 'amont-attest-input %s %s\n' "$g" "$fp" | git hash-object --stdin 2> /dev/null
     done < "$tmp/fps"
+    [ -z "$canon_oid" ] || canon_key "$canon_oid"
 }
 # shellcheck disable=SC2046  # oids, deliberately split
 set -- $(input_keys)

@@ -72,6 +72,11 @@ compat: ## prove released verifiers degrade safely on newer notes
 	@echo "--- optional paths: git-attest 1.3.1 (built from the tag) ---"
 	$(call build_tag,v1.3.1)
 	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.3.1/target/release/git-attest covered" fp13
+	@echo "--- canonical tree: verify.sh 1.4.1 (frozen copy) ---"
+	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.4.1.sh --quiet" fp14
+	@echo "--- canonical tree: git-attest 1.4.1 (built from the tag) ---"
+	$(call build_tag,v1.4.1)
+	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.4.1/target/release/git-attest covered" fp14
 	@echo "--- input lines: current verify.sh ---"
 	@./tests/compat-fields.sh "bash $(PWD)/verify.sh --quiet" new
 	@echo "--- input lines: current git-attest ---"
