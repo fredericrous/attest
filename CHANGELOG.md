@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0
 
 - **One implementation, as a library** (decisions ADR-0037). `git-attest` is
   now the std-only `git_attest` library with the binary as a thin command line
