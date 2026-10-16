@@ -27,9 +27,27 @@ pub struct PathTok {
 }
 
 /// The committed declaration of which paths each gate reads.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Spec {
     pub gates: Vec<(String, Vec<PathTok>)>,
+    /// `@plan-exempt off`: the repository opts out of the canonical tree.
+    pub plan_exempt_off: bool,
+}
+
+/// The one directive a spec may hold (1.6.0): the canonical opt-out.
+pub const PLAN_EXEMPT_DIRECTIVE: [&str; 2] = ["@plan-exempt", "off"];
+
+/// Is this spec line the opt-out directive? Blanks around and between the
+/// two words are tolerated, nothing else.
+pub fn is_plan_exempt_directive(line: &[u8]) -> bool {
+    let words: Vec<&[u8]> = line
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.len() == 2
+        && words[0] == PLAN_EXEMPT_DIRECTIVE[0].as_bytes()
+        && words[1] == PLAN_EXEMPT_DIRECTIVE[1].as_bytes()
 }
 
 impl Spec {
@@ -99,6 +117,8 @@ pub enum Error {
     },
     /// More than [`MAX_SPEC_GATES`] gates.
     TooManyGates,
+    /// A line starting with `@` that is not `@plan-exempt off`.
+    Directive { line: usize, text: String },
 }
 
 impl std::fmt::Display for PathProblem {
@@ -148,6 +168,10 @@ impl std::fmt::Display for Error {
                 problem,
             } => write!(f, "line {line}: path `{path}` {problem}"),
             Error::TooManyGates => write!(f, "declares more than {MAX_SPEC_GATES} gates"),
+            Error::Directive { line, text } => write!(
+                f,
+                "line {line}: `{text}` is not a directive; the only one is `@plan-exempt off`"
+            ),
         }
     }
 }
@@ -208,12 +232,25 @@ pub fn parse_spec(bytes: &[u8]) -> Result<Spec, Error> {
     // Every byte is ASCII by the check above.
     let text = std::str::from_utf8(bytes).expect("ASCII is UTF-8");
     let mut gates: Vec<(String, Vec<PathTok>)> = Vec::new();
+    let mut plan_exempt_off = false;
     for (n, line) in text.split('\n').enumerate() {
         let line_no = n + 1;
         let mut toks = line.split([' ', '\t']).filter(|t| !t.is_empty());
         let Some(gate) = toks.next() else { continue };
         if gate.starts_with('#') {
             continue;
+        }
+        // A directive, never a gate: an older parser reads `@` as an invalid
+        // gate name, which disables its fingerprint route and grants nothing.
+        if gate.starts_with('@') {
+            if is_plan_exempt_directive(line.as_bytes()) {
+                plan_exempt_off = true;
+                continue;
+            }
+            return Err(Error::Directive {
+                line: line_no,
+                text: line.trim().to_string(),
+            });
         }
         let at = |gate: &str| (line_no, gate.to_string());
         if !valid_gate(gate) {
@@ -260,7 +297,10 @@ pub fn parse_spec(bytes: &[u8]) -> Result<Spec, Error> {
             return Err(Error::TooManyGates);
         }
     }
-    Ok(Spec { gates })
+    Ok(Spec {
+        gates,
+        plan_exempt_off,
+    })
 }
 
 /// The paths every fingerprint lists besides the gate's own: both spec
@@ -308,23 +348,55 @@ pub fn conf_says_plan_exempt_off(bytes: &[u8]) -> bool {
     })
 }
 
-/// What `tree:amont.conf` says about the canonical route.
+/// What a tree says about the canonical route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PlanExempt {
-    /// A successful `ls-tree` that lists no `amont.conf`, or one without the
-    /// `set planExempt off` line.
+    /// Neither opt-out is committed.
     On,
-    /// The committed `amont.conf` opts out.
+    /// `@plan-exempt off` in the tree's `attest-inputs`.
     Off,
-    /// A failing `ls-tree`, or a listed `amont.conf` whose blob cannot be
-    /// read. Fails narrow: callers treat it as off; only the log differs.
+    /// Only `set planExempt off` in the tree's `amont.conf`: off, and
+    /// deprecated (read until 2.0.0).
+    OffByAmontConf,
+    /// A failing `ls-tree`, or a listed file whose blob cannot be read. Fails
+    /// narrow: callers treat it as off; only the log differs.
     Unreadable,
 }
 
-/// Is the canonical route switched off for `tree`? Read from the bytes of
-/// `tree:amont.conf` itself, never through amont's trust-gated settings: `off`
-/// only narrows, so it is honoured whoever wrote it.
+impl PlanExempt {
+    /// Is the canonical route unavailable?
+    pub fn is_off(self) -> bool {
+        !matches!(self, PlanExempt::On)
+    }
+}
+
+/// The line a verifier reports when only the deprecated opt-out is present.
+pub const DEPRECATED_OPT_OUT: &str =
+    "deprecated: planExempt in amont.conf; also write @plan-exempt off in attest-inputs";
+
+/// Is the canonical route switched off for `tree`? Read from the committed
+/// bytes, never through a tool's trust-gated settings: `off` only narrows, so
+/// it is honoured whoever wrote it. The directive is found in either spec
+/// location even when the spec is otherwise invalid, for the same reason.
 pub fn plan_exempt(root: &Path, tree: &str) -> PlanExempt {
+    for path in SPEC_PATHS {
+        let Some(listing) =
+            git::stdout_bytes_in(root, &["ls-tree", "--full-tree", tree, "--", path])
+        else {
+            return PlanExempt::Unreadable;
+        };
+        if listing.is_empty() {
+            continue;
+        }
+        match git::stdout_bytes_in(root, &["cat-file", "blob", &format!("{tree}:{path}")]) {
+            Some(bytes) if bytes.split(|&b| b == b'\n').any(is_plan_exempt_directive) => {
+                return PlanExempt::Off
+            }
+            Some(_) => {}
+            None => return PlanExempt::Unreadable,
+        }
+    }
     let Some(listing) =
         git::stdout_bytes_in(root, &["ls-tree", "--full-tree", tree, "--", "amont.conf"])
     else {
@@ -334,7 +406,7 @@ pub fn plan_exempt(root: &Path, tree: &str) -> PlanExempt {
         return PlanExempt::On;
     }
     match git::stdout_bytes_in(root, &["cat-file", "blob", &format!("{tree}:amont.conf")]) {
-        Some(bytes) if conf_says_plan_exempt_off(&bytes) => PlanExempt::Off,
+        Some(bytes) if conf_says_plan_exempt_off(&bytes) => PlanExempt::OffByAmontConf,
         Some(_) => PlanExempt::On,
         None => PlanExempt::Unreadable,
     }

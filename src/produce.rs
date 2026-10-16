@@ -82,12 +82,12 @@ pub fn attestation(
         ));
     }
     let canon_oid = match plan_exempt(root, tree) {
-        PlanExempt::Off => {
+        PlanExempt::Off | PlanExempt::OffByAmontConf => {
             log.push("planExempt is off here; no canonical tree".into());
             None
         }
         PlanExempt::Unreadable => {
-            log.push("cannot read amont.conf; no canonical tree".into());
+            log.push("cannot read amont.conf or attest-inputs; no canonical tree".into());
             None
         }
         PlanExempt::On => {

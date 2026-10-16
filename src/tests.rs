@@ -614,3 +614,26 @@ fn the_library_answers_for_the_repository_it_is_given() {
     assert_eq!(att.input_keys.len(), 2, "one input key, one canonical key");
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+#[test]
+fn the_opt_out_directive_is_a_line_of_the_spec_and_nothing_else_is() {
+    let s = parse_spec(b"# x\n  @plan-exempt \t off  \nlint src\n").unwrap();
+    assert!(s.plan_exempt_off);
+    assert_eq!(s.gates.len(), 1);
+    assert!(parse_spec(b"@plan-exempt off\n").unwrap().plan_exempt_off);
+    assert!(!parse_spec(b"lint src\n").unwrap().plan_exempt_off);
+    for bad in [
+        "@plan-exempt on\n",
+        "@plan-exempt off off\n",
+        "@planExempt off\n",
+        "@x\n",
+    ] {
+        let e = parse_spec(bad.as_bytes()).unwrap_err();
+        assert!(
+            matches!(e, crate::spec::Error::Directive { .. }),
+            "{bad:?}: {e}"
+        );
+    }
+    assert!(is_plan_exempt_directive(b" @plan-exempt\toff "));
+    assert!(!is_plan_exempt_directive(b"@plan-exempt off\r"));
+}

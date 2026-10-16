@@ -227,22 +227,36 @@ detect_platform() {
 # hashed. Needs only a POSIX awk. Kept byte-identical in verify.sh and
 # sign/sign.sh; `make lint` checks that. Both read $tmp and, if set, $root.
 
-# Does tree $1 opt out of the canonical route (`set planExempt off` in its
-# amont.conf)? One tolerant reading shared with git-attest and amont: strip CR,
-# trim blanks, compare the three words case-insensitively; any match is off.
-# Exit 0: off. Exit 1: on, which only a successful ls-tree that lists no
-# amont.conf means. Exit 2: unreadable, a failing ls-tree or an amont.conf that
-# is listed but cannot be read; fails narrow, so callers treat it as off and
-# only the log differs.
+# Does tree $1 opt out of the canonical route? Two committed forms, either one
+# enough: `@plan-exempt off` in its attest-inputs (1.6.0; blanks around and
+# between the two words, nothing else, found even in a spec that is otherwise
+# invalid, since off only narrows), and `set planExempt off` in its amont.conf,
+# read until 2.0.0 with one tolerant reading shared with git-attest and amont:
+# strip CR, trim blanks, compare the three words case-insensitively.
+# Exit 0: off, by the directive. Exit 3: off, by amont.conf alone (deprecated).
+# Exit 1: on. Exit 2: unreadable, a failing ls-tree or a listed file that
+# cannot be read; fails narrow, so callers treat it as off and only the log
+# differs.
 plan_exempt_off() {
-    local listing
+    local listing p
+    for p in .forgejo/attest-inputs .github/attest-inputs; do
+        listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- "$p" 2> /dev/null) || return 2
+        [ -n "$listing" ] || continue
+        git -C "${root:-.}" cat-file blob "$1:$p" > "$tmp/opt-out" 2> /dev/null || return 2
+        LC_ALL=C awk '{
+            k = split($0, w, /[ \t]+/); n = 0
+            for (i = 1; i <= k; i++) if (w[i] != "") v[++n] = w[i]
+            if (n == 2 && v[1] == "@plan-exempt" && v[2] == "off") found = 1
+        } END { exit !found }' "$tmp/opt-out" && return 0
+    done
     listing=$(git -C "${root:-.}" ls-tree --full-tree "$1" -- amont.conf 2> /dev/null) || return 2
     [ -n "$listing" ] || return 1
     git -C "${root:-.}" cat-file blob "$1:amont.conf" > "$tmp/amont.conf" 2> /dev/null || return 2
     LC_ALL=C awk '{
         gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
         if (split($0, w, /[ \t]+/) == 3 && tolower(w[1]) == "set" && tolower(w[2]) == "planexempt" && tolower(w[3]) == "off") found = 1
-    } END { exit !found }' "$tmp/amont.conf"
+    } END { exit !found }' "$tmp/amont.conf" && return 3
+    return 1
 }
 
 # The canonical fingerprint of tree $1, or nothing when git fails at any step
@@ -307,6 +321,11 @@ load_spec() {
     if ! awk '
         function bad(why) { printf "line %d: %s\n", NR, why > "/dev/stderr"; exit 1 }
         { sub(/^[ \t]+/, ""); if ($0 == "" || substr($0, 1, 1) == "#") next }
+        # The one directive (1.6.0), never a gate; any other `@` line is invalid.
+        substr($0, 1, 1) == "@" {
+            if (NF == 2 && $1 == "@plan-exempt" && $2 == "off") next
+            bad("`" $0 "` is not a directive; the only one is `@plan-exempt off`")
+        }
         {
             g = $1
             if (g !~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ || length(g) > 64) bad("gate name `" g "` is not [A-Za-z0-9][A-Za-z0-9._-]* of at most 64 characters")
@@ -408,10 +427,10 @@ fi
 canon_oid=
 plan_exempt_off "$object_tree"
 case $? in
-    0) say "planExempt is off here; no canonical tree" ;;
+    0 | 3) say "planExempt is off here; no canonical tree" ;;
     1) canon_oid=$(canon_of "$object_tree") || canon_oid=
        [ -n "$canon_oid" ] || say "cannot compute the canonical tree; none attached" ;;
-    *) say "cannot read amont.conf; no canonical tree" ;;
+    *) say "cannot read amont.conf or attest-inputs; no canonical tree" ;;
 esac
 
 # The payload, in the exact shape SPEC.md gives — the `input` lines after

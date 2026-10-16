@@ -243,15 +243,21 @@ fn run(args: &[String]) -> u8 {
             trail,
             notes,
             loud,
+            warnings,
         } = verdict;
         // A change to the repository's refs is always reported, `explain` or
         // not: data went away, and the line says how to bring it back.
         for line in &loud {
             eprintln!("attest: {line}");
         }
+        // `explain` says the warnings where they arose, in the trail.
         if explain {
             for step in &trail {
                 eprintln!("attest: {step}");
+            }
+        } else {
+            for line in &warnings {
+                eprintln!("attest: {line}");
             }
         }
         if gha {
@@ -284,6 +290,7 @@ fn run(args: &[String]) -> u8 {
             ],
             notes: None,
             loud: Vec::new(),
+            warnings: Vec::new(),
         });
     };
 

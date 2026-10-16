@@ -20,7 +20,7 @@ use crate::format::{
 };
 use crate::git;
 use crate::notes::{sync_mirrors, Mirror};
-use crate::spec::{plan_exempt, AtError, PlanExempt, Spec, SPEC_PATHS};
+use crate::spec::{plan_exempt, AtError, PlanExempt, Spec, DEPRECATED_OPT_OUT, SPEC_PATHS};
 
 /// How many signatures one invocation verifies, over every candidate. A
 /// verification is one call of [`verify`]; blocks the cheap checks reject and
@@ -45,6 +45,10 @@ pub struct Verdict {
     /// Lines that report a change to the repository's refs. They are shown
     /// even without `explain`: data went away, and they say how to restore it.
     pub loud: Vec<String>,
+    /// Lines that say something committed is deprecated, also in the trail
+    /// where they arose. Shown even without `explain`, so the repository
+    /// hears it before the old form stops working.
+    pub warnings: Vec<String>,
 }
 
 impl Verdict {
@@ -54,6 +58,7 @@ impl Verdict {
             trail: vec![reason.into()],
             notes: None,
             loud: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -178,6 +183,7 @@ struct Judge<'a> {
     fp_memo: Vec<(String, Option<String>)>,
     canon_memo: Option<Option<String>>,
     canon_used: bool,
+    warnings: Vec<String>,
     covered: Vec<String>,
     trail: Vec<String>,
     seen_notes: Vec<String>,
@@ -208,17 +214,21 @@ impl Judge<'_> {
             return c.clone();
         }
         let c = match plan_exempt(&self.root, &self.head_tree) {
-            PlanExempt::Off => {
+            how @ (PlanExempt::Off | PlanExempt::OffByAmontConf) => {
                 push_reason(
                     &mut self.trail,
                     "planExempt is off here; canonical trees are not used".into(),
                 );
+                if how == PlanExempt::OffByAmontConf {
+                    push_reason(&mut self.trail, DEPRECATED_OPT_OUT.into());
+                    union(&mut self.warnings, std::iter::once(DEPRECATED_OPT_OUT));
+                }
                 None
             }
             PlanExempt::Unreadable => {
                 push_reason(
                     &mut self.trail,
-                    "cannot read amont.conf; canonical trees are not used".into(),
+                    "cannot read amont.conf or attest-inputs; canonical trees are not used".into(),
                 );
                 None
             }
@@ -480,6 +490,7 @@ pub fn evaluate(
             trail,
             notes: None,
             loud,
+            warnings: Vec::new(),
         };
     };
 
@@ -535,6 +546,7 @@ pub fn evaluate(
             trail,
             notes,
             loud,
+            warnings: Vec::new(),
         };
     };
 
@@ -550,6 +562,7 @@ pub fn evaluate(
         fp_memo: Vec::new(),
         canon_memo: None,
         canon_used: false,
+        warnings: Vec::new(),
         covered: Vec::new(),
         trail,
         seen_notes: Vec::new(),
@@ -631,6 +644,7 @@ pub fn evaluate(
         trail: judge.trail,
         notes,
         loud,
+        warnings: judge.warnings,
     }
 }
 

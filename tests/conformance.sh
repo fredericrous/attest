@@ -823,6 +823,50 @@ printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
 reason_in "$R"
 case $ERR in *"cannot read amont.conf"*) ok "canon: an unreadable amont.conf says so" ;; *) fail "canon: an unreadable amont.conf says so" "$ERR" ;; esac
 
+# The opt-out directive (1.6.0): `@plan-exempt off` in attest-inputs turns the
+# canonical route off as `set planExempt off` in amont.conf does; it is the
+# form that stays after 2.0.0. Any other `@` line invalidates the spec, which
+# disables the fingerprint route only.
+canon_spec_repo() { # attest-inputs content [amont.conf content]
+    canon_repo "${2:-}"
+    printf '%b' "$1" > "$R/.github/attest-inputs"
+    git -C "$R" add -A; git -C "$R" commit -q -m spec
+}
+canon_spec_repo '@plan-exempt off\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: @plan-exempt off in attest-inputs: nothing" "" "$R"
+reason_in "$R"
+case $ERR in *"planExempt is off here"*) ok "canon: ...and says so" ;; *) fail "canon: ...and says so" "$ERR" ;; esac
+case $ERR in *deprecated*) fail "canon: ...with no deprecation" "$ERR" ;; *) ok "canon: ...with no deprecation" ;; esac
+canon_spec_repo '# opting out\n \t@plan-exempt \t off \n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: the directive among comments and blanks: nothing" "" "$R"
+canon_spec_repo '@plan-exempt off\ntest src\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: the directive beside a gate: nothing by canon" "" "$R"
+reason_in "$R"
+case $ERR in *"input fingerprints disabled"*) fail "canon: ...and the spec stays valid" "$ERR" ;; *) ok "canon: ...and the spec stays valid" ;; esac
+canon_spec_repo '@plan-exempt on\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: another directive is no opt-out" "test lint" "$R"
+reason_in "$R"
+case $ERR in *"is not a directive"*"input fingerprints disabled"*) ok "canon: ...and invalidates the spec" ;; *) fail "canon: ...and invalidates the spec" "$ERR" ;; esac
+canon_spec_repo 'test src\n@plan-exempt off off\n' 'set planExempt off\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: an invalid spec still holds amont.conf's opt-out: nothing" "" "$R"
+
+# amont.conf alone still opts out, and says it is deprecated; with both
+# lines, which is what a repository writes until 2.0.0, nothing is said.
+canon_repo 'set planExempt off\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+reason_in "$R"
+case $ERR in *"deprecated: planExempt in amont.conf; also write @plan-exempt off in attest-inputs"*) ok "canon: amont.conf alone is deprecated" ;; *) fail "canon: amont.conf alone is deprecated" "$ERR" ;; esac
+canon_spec_repo '@plan-exempt off\n' 'set planExempt off\n'; attest_canon
+printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+check "canon: both opt-outs: nothing" "" "$R"
+reason_in "$R"
+case $ERR in *deprecated*) fail "canon: ...and no deprecation" "$ERR" ;; *) ok "canon: ...and no deprecation" ;; esac
+
 # The reason names a canonical key only when the canonical tree covered something.
 canon_repo; attest_canon test s390x-aix
 printf 'edited\n' > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
