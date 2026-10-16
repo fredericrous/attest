@@ -5,8 +5,7 @@
 //! else: CI that is neither GitHub nor Forgejo, and a laptop asking why a skip
 //! did not happen.
 
-mod attest;
-mod git;
+use git_attest::{format, verify as attest};
 
 const USAGE: &str = "\
 git-attest — what a signed attestation covers for the tree checked out here
@@ -210,10 +209,11 @@ fn run(args: &[String]) -> u8 {
         0
     };
 
+    let here = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let Some(signers) = signers
         .as_deref()
-        .map(attest::resolve_signers)
-        .or_else(attest::default_signers)
+        .map(|s| attest::resolve_signers(&here, s))
+        .or_else(|| attest::default_signers(&here))
     else {
         return done(attest::Verdict {
             gates: Vec::new(),
@@ -232,10 +232,11 @@ fn run(args: &[String]) -> u8 {
     let want = match platform.as_deref() {
         Some("any") => None,
         Some(explicit) => Some(explicit.to_string()),
-        None => Some(attest::platform()),
+        None => Some(format::platform()),
     };
 
     done(attest::evaluate(
+        &here,
         &signers,
         principal.as_deref(),
         want.as_deref(),
@@ -348,10 +349,10 @@ mod tests {
     #[test]
     fn split_note_restores_the_signed_trailing_newline() {
         let body = "amont-attest-v2\ntree abc\n\n-----BEGIN SSH SIGNATURE-----\nx";
-        let (payload, sig) = attest::split_note(body).unwrap();
+        let (payload, sig) = format::split_note(body).unwrap();
         assert_eq!(payload, "amont-attest-v2\ntree abc\n");
         assert!(sig.starts_with("-----BEGIN SSH SIGNATURE-----"));
-        assert!(attest::split_note("no blank line here").is_none());
-        assert!(attest::split_note("payload\n\nnot a signature").is_none());
+        assert!(format::split_note("no blank line here").is_none());
+        assert!(format::split_note("payload\n\nnot a signature").is_none());
     }
 }
