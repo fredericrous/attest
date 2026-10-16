@@ -23,6 +23,10 @@
 - **Known answers** for the payload (blocks captured from `sign.sh` 1.5.1 and
   amont 1.57.0), the spec grammar and the note keys, in `tests/vectors/`.
 - The release publishes to crates.io or fails: amont depends on the crate.
+- **An unusable spec degrades to the object key**, as SPEC.md says: a
+  producer that finds an invalid, ambiguous or unreadable `attest-inputs`
+  attaches neither `input` lines nor a `canon` line. `sign.sh` attached a
+  `canon` line all the same; amont never did.
 
 ## 1.5.1
 
