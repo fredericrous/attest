@@ -99,7 +99,7 @@ fn union_keeps_first_appearance_order_without_duplicates() {
 // --- input fingerprints -------------------------------------------------
 
 fn spec_of(s: &str) -> Result<Spec, String> {
-    parse_spec(s.as_bytes())
+    parse_spec(s.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[test]
@@ -130,10 +130,14 @@ fn spec_rejects_every_byte_outside_printable_ascii_first() {
         b"g\xc2\xa0src",
         b"g s\x01rc",
     ] {
-        assert!(parse_spec(bad).unwrap_err().contains("byte 0x"), "{bad:?}");
+        assert!(
+            parse_spec(bad).unwrap_err().to_string().contains("byte 0x"),
+            "{bad:?}"
+        );
     }
     assert!(parse_spec(&vec![b'\n'; MAX_SPEC_BYTES + 1])
         .unwrap_err()
+        .to_string()
         .contains("larger"));
     // exactly the limit, mostly newlines, is fine
     let mut ok = b"g src".to_vec();

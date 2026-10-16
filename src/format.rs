@@ -29,8 +29,8 @@ pub const NAMESPACE: &str = "amont-attest";
 /// runs, and the notes ref is writable by anyone with push access.
 pub const MAX_BLOCKS: usize = 32;
 
-pub const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----";
-pub const END: &str = "-----END SSH SIGNATURE-----";
+pub(crate) const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----";
+pub(crate) const END: &str = "-----END SSH SIGNATURE-----";
 
 /// Where a suite ran, as `<arch>-<os>`. Coarser than a target triple on
 /// purpose: the libc flavour is not something `std` can answer, and the

@@ -196,7 +196,7 @@ impl Judge<'_> {
         let fp = self
             .spec
             .as_ref()
-            .and_then(|s| fingerprint(&self.root, &self.head_tree, s, gate));
+            .and_then(|s| fingerprint(&self.root, &self.head_tree, s, gate).ok());
         self.fp_memo.push((gate.to_string(), fp.clone()));
         fp
     }
@@ -223,7 +223,7 @@ impl Judge<'_> {
                 None
             }
             PlanExempt::On => {
-                let c = canon(&self.root, &self.head_tree);
+                let c = canon(&self.root, &self.head_tree).ok();
                 if c.is_none() {
                     push_reason(
                         &mut self.trail,
@@ -608,7 +608,7 @@ pub fn evaluate(
             );
             continue;
         };
-        let Some(k) = key(&judge.root, &gate, &fp) else {
+        let Ok(k) = key(&judge.root, &gate, &fp) else {
             continue;
         };
         let at = format!("input {gate} {}", &fp[..12]);
@@ -621,7 +621,7 @@ pub fn evaluate(
     // on another tree whose canonical form is this one's.
     if !judge.exhausted {
         if let Some(c) = judge.canon_here() {
-            if let Some(k) = canon_key(&judge.root, &c) {
+            if let Ok(k) = canon_key(&judge.root, &c) {
                 let at = format!("canon {}", &c[..12]);
                 for r in &refs_inputs {
                     judge.judge(r, &k, &label(r, &at));

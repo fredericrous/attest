@@ -66,7 +66,7 @@ fn drop_mirror(root: &Path, loud: &mut Vec<String>, notes_ref: &str) -> Mirror {
 /// Where fetches land before they become the mirror: outside `refs/notes/`,
 /// one directory per process id, so no notes push or pruning fetch ever
 /// touches them.
-pub const TMP_NS: &str = "refs/attest-tmp/";
+pub(crate) const TMP_NS: &str = "refs/attest-tmp/";
 
 /// Remove the throwaways of runs killed before their cleanup — only those
 /// whose process is gone, so a concurrent run in the same clone keeps its

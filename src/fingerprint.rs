@@ -8,12 +8,48 @@ use crate::format::is_oid;
 use crate::git;
 use crate::spec::{implicit_inputs, Spec};
 
-/// The fingerprint of `gate` on `tree`, or `None` when the gate has none
-/// there: not in the spec, a token that does not resolve, git failing at any
-/// step, or an empty listing (which would hash to the same value on every
-/// tree and is refused as an assertion).
-pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Option<String> {
-    let toks = spec.paths_of(gate)?;
+/// Why a fingerprint or a key could not be computed. Every one means "no
+/// fingerprint here", which can only cost a skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// The spec declares no such gate.
+    NotDeclared,
+    /// A required path does not exist in the tree.
+    MissingPath,
+    /// The listing was empty, which would hash alike on every tree.
+    EmptyListing,
+    /// The listing was not a well-formed `ls-tree` listing.
+    Malformed,
+    /// git failed, or printed something that is not an object id.
+    Git,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Error::NotDeclared => "the spec declares no such gate",
+            Error::MissingPath => "a declared path does not exist in this tree",
+            Error::EmptyListing => "the declared paths list nothing",
+            Error::Malformed => "the tree listing is malformed",
+            Error::Git => "git failed",
+        })
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// `hash-object --stdin` of `bytes`, as an object id.
+fn hash(root: &Path, bytes: &[u8]) -> Result<String, Error> {
+    git::stdout_with_input_in(root, &["hash-object", "--stdin"], bytes)
+        .filter(|s| is_oid(s))
+        .ok_or(Error::Git)
+}
+
+/// The fingerprint of `gate` on `tree`. An empty listing would hash to the
+/// same value on every tree and is refused as an assertion.
+pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Result<String, Error> {
+    let toks = spec.paths_of(gate).ok_or(Error::NotDeclared)?;
     let paths: Vec<String> = toks.iter().map(|t| t.path.clone()).collect();
     // Every REQUIRED token must resolve — one `cat-file --batch-check` for
     // all of them, never one process per token. An optional one is listed if
@@ -26,11 +62,13 @@ pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Option<S
     if !required.is_empty() {
         let names: String = required.iter().map(|p| format!("{tree}:{p}\n")).collect();
         let answers =
-            git::stdout_with_input_in(root, &["cat-file", "--batch-check"], names.as_bytes())?;
-        if answers.lines().count() != required.len()
-            || answers.lines().any(|l| l.ends_with(" missing"))
-        {
-            return None;
+            git::stdout_with_input_in(root, &["cat-file", "--batch-check"], names.as_bytes())
+                .ok_or(Error::Git)?;
+        if answers.lines().count() != required.len() {
+            return Err(Error::Git);
+        }
+        if answers.lines().any(|l| l.ends_with(" missing")) {
+            return Err(Error::MissingPath);
         }
     }
     let mut args: Vec<String> = vec![
@@ -44,11 +82,11 @@ pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Option<S
     args.extend(implicit_inputs(&paths));
     args.extend(paths.iter().cloned());
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let listing = git::stdout_bytes_in(root, &argv)?;
+    let listing = git::stdout_bytes_in(root, &argv).ok_or(Error::Git)?;
     if listing.is_empty() {
-        return None;
+        return Err(Error::EmptyListing);
     }
-    git::stdout_with_input_in(root, &["hash-object", "--stdin"], &listing).filter(|s| is_oid(s))
+    hash(root, &listing)
 }
 
 /// The bytes a fingerprint key is hashed from.
@@ -58,13 +96,8 @@ pub fn key_preimage(gate: &str, fp: &str) -> String {
 
 /// The synthetic note key for (gate, fingerprint): an oid that is not an
 /// object, which `git notes` accepts as a key all the same.
-pub fn key(root: &Path, gate: &str, fp: &str) -> Option<String> {
-    git::stdout_with_input_in(
-        root,
-        &["hash-object", "--stdin"],
-        key_preimage(gate, fp).as_bytes(),
-    )
-    .filter(|s| is_oid(s))
+pub fn key(root: &Path, gate: &str, fp: &str) -> Result<String, Error> {
+    hash(root, key_preimage(gate, fp).as_bytes())
 }
 
 /// The canonical text of an `ls-tree -r --full-tree` listing (paths quoted by
@@ -98,8 +131,8 @@ pub fn canon_text(listing: &str) -> Option<String> {
 }
 
 /// The canonical fingerprint of `tree`: `canon_text` of its listing, hashed
-/// with `git hash-object`. `None` when git fails at any step.
-pub fn canon(root: &Path, tree: &str) -> Option<String> {
+/// with `git hash-object`.
+pub fn canon(root: &Path, tree: &str) -> Result<String, Error> {
     let listing = git::stdout_bytes_in(
         root,
         &[
@@ -110,10 +143,11 @@ pub fn canon(root: &Path, tree: &str) -> Option<String> {
             "--full-tree",
             tree,
         ],
-    )?;
-    let text = canon_text(std::str::from_utf8(&listing).ok()?)?;
-    git::stdout_with_input_in(root, &["hash-object", "--stdin"], text.as_bytes())
-        .filter(|s| is_oid(s))
+    )
+    .ok_or(Error::Git)?;
+    let listing = std::str::from_utf8(&listing).map_err(|_| Error::Malformed)?;
+    let text = canon_text(listing).ok_or(Error::Malformed)?;
+    hash(root, text.as_bytes())
 }
 
 /// The bytes the canonical key is hashed from.
@@ -122,11 +156,6 @@ pub fn canon_key_preimage(canon: &str) -> String {
 }
 
 /// The synthetic note key for a canonical fingerprint, in the inputs ref.
-pub fn canon_key(root: &Path, canon: &str) -> Option<String> {
-    git::stdout_with_input_in(
-        root,
-        &["hash-object", "--stdin"],
-        canon_key_preimage(canon).as_bytes(),
-    )
-    .filter(|s| is_oid(s))
+pub fn canon_key(root: &Path, canon: &str) -> Result<String, Error> {
+    hash(root, canon_key_preimage(canon).as_bytes())
 }

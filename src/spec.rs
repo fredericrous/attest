@@ -51,44 +51,143 @@ pub(crate) fn valid_gate(name: &str) -> bool {
     name.len() <= 64 && chars.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
-/// Why a path token is not a literal, root-relative file or directory —
-/// `None` when it is. `git ls-tree` does not glob, so a wildcard would match
-/// nothing and silently fingerprint nothing; every other shape here is a
-/// path git would interpret rather than look up.
-pub(crate) fn path_error(tok: &str) -> Option<String> {
+/// Why a path token is not a literal, root-relative file or directory.
+/// `git ls-tree` does not glob, so a wildcard would match nothing and
+/// silently fingerprint nothing; every other shape here is a path git would
+/// interpret rather than look up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PathProblem {
+    /// `?` alone.
+    NamesNothing,
+    /// Starts with `:`, git's pathspec magic.
+    Magic,
+    /// Starts with `/`.
+    Absolute,
+    /// Starts with `./` or `../`.
+    Relative,
+    /// Ends with `/`.
+    TrailingSlash,
+    /// Contains a glob or escape character.
+    Glob(char),
+    /// Has an empty, `.` or `..` component.
+    BadComponent,
+}
+
+/// Why a spec is invalid. Any one invalidates the whole spec. `Display` is
+/// the reason the verifier reports, after the spec's path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// Larger than [`MAX_SPEC_BYTES`].
+    TooLarge,
+    /// A byte outside printable ASCII, space, tab and LF.
+    Byte(u8),
+    /// A gate name outside `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+    GateName { line: usize, gate: String },
+    /// A gate declared on two lines.
+    Duplicate { line: usize, gate: String },
+    /// A gate with no paths.
+    NoPaths { line: usize, gate: String },
+    /// A gate with more than [`MAX_SPEC_PATHS`] paths.
+    TooManyPaths { line: usize, gate: String },
+    /// A path that is not a literal, root-relative path.
+    Path {
+        line: usize,
+        path: String,
+        problem: PathProblem,
+    },
+    /// More than [`MAX_SPEC_GATES`] gates.
+    TooManyGates,
+}
+
+impl std::fmt::Display for PathProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathProblem::NamesNothing => write!(f, "names nothing"),
+            PathProblem::Magic => write!(f, "starts with `:` (pathspec magic is not allowed)"),
+            PathProblem::Absolute => {
+                write!(f, "is absolute; paths are relative to the repository root")
+            }
+            PathProblem::Relative => write!(f, "starts with `./` or `../`"),
+            PathProblem::TrailingSlash => write!(f, "ends with `/`; name the directory without it"),
+            PathProblem::Glob(c) => write!(
+                f,
+                "contains `{c}`; git ls-tree does not glob, only literal paths are accepted"
+            ),
+            PathProblem::BadComponent => write!(f, "has an empty, `.` or `..` component"),
+        }
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::TooLarge => write!(f, "is larger than {MAX_SPEC_BYTES} bytes"),
+            Error::Byte(b) => write!(
+                f,
+                "contains byte 0x{b:02x}; only printable ASCII, space, tab and LF are allowed"
+            ),
+            Error::GateName { line, gate } => write!(
+                f,
+                "line {line}: gate name `{gate}` is not [A-Za-z0-9][A-Za-z0-9._-]* of at most 64 characters"
+            ),
+            Error::Duplicate { line, gate } => {
+                write!(f, "line {line}: gate `{gate}` is declared twice")
+            }
+            Error::NoPaths { line, gate } => {
+                write!(f, "line {line}: gate `{gate}` declares no paths")
+            }
+            Error::TooManyPaths { line, gate } => write!(
+                f,
+                "line {line}: gate `{gate}` declares more than {MAX_SPEC_PATHS} paths"
+            ),
+            Error::Path {
+                line,
+                path,
+                problem,
+            } => write!(f, "line {line}: path `{path}` {problem}"),
+            Error::TooManyGates => write!(f, "declares more than {MAX_SPEC_GATES} gates"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// What is wrong with one path token, and the token as reported (without
+/// its `?` marker); `None` when it is a literal, root-relative path.
+pub(crate) fn path_error(tok: &str) -> Option<(String, PathProblem)> {
     // One leading `?` marks an optional path; the rest obeys every rule
     // below, so `??x` (a wildcard) and `?/x` (absolute) fail them.
     let tok = match tok.strip_prefix('?') {
-        Some("") => return Some("path `?` names nothing".into()),
+        Some("") => return Some(("?".into(), PathProblem::NamesNothing)),
         Some(rest) => rest,
         None => tok,
     };
-    let bad = |why: &str| Some(format!("path `{tok}` {why}"));
+    let bad = |p: PathProblem| Some((tok.to_string(), p));
     if tok.starts_with(':') {
-        return bad("starts with `:` (pathspec magic is not allowed)");
+        return bad(PathProblem::Magic);
     }
     if tok.starts_with('/') {
-        return bad("is absolute; paths are relative to the repository root");
+        return bad(PathProblem::Absolute);
     }
     if tok.starts_with("./") || tok.starts_with("../") {
-        return bad("starts with `./` or `../`");
+        return bad(PathProblem::Relative);
     }
     if tok.ends_with('/') {
-        return bad("ends with `/`; name the directory without it");
+        return bad(PathProblem::TrailingSlash);
     }
     if let Some(c) = tok
         .chars()
         .find(|c| matches!(c, '*' | '?' | '[' | ']' | '\\'))
     {
-        return bad(&format!(
-            "contains `{c}`; git ls-tree does not glob, only literal paths are accepted"
-        ));
+        return bad(PathProblem::Glob(c));
     }
     if tok
         .split('/')
         .any(|c| c.is_empty() || c == "." || c == "..")
     {
-        return bad("has an empty, `.` or `..` component");
+        return bad(PathProblem::BadComponent);
     }
     None
 }
@@ -96,45 +195,51 @@ pub(crate) fn path_error(tok: &str) -> Option<String> {
 /// The spec grammar, byte-strict. Every violation is a distinct reason, and
 /// any violation invalidates the WHOLE spec: a line that silently dropped out
 /// would be one the author believes is protecting something.
-pub fn parse_spec(bytes: &[u8]) -> Result<Spec, String> {
+pub fn parse_spec(bytes: &[u8]) -> Result<Spec, Error> {
     if bytes.len() > MAX_SPEC_BYTES {
-        return Err(format!("is larger than {MAX_SPEC_BYTES} bytes"));
+        return Err(Error::TooLarge);
     }
-    if let Some(b) = bytes
+    if let Some(&b) = bytes
         .iter()
         .find(|&&b| !(b == b' ' || b == b'\t' || b == b'\n' || (0x21..=0x7e).contains(&b)))
     {
-        return Err(format!(
-            "contains byte 0x{b:02x}; only printable ASCII, space, tab and LF are allowed"
-        ));
+        return Err(Error::Byte(b));
     }
-    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    // Every byte is ASCII by the check above.
+    let text = std::str::from_utf8(bytes).expect("ASCII is UTF-8");
     let mut gates: Vec<(String, Vec<PathTok>)> = Vec::new();
     for (n, line) in text.split('\n').enumerate() {
-        let n = n + 1;
+        let line_no = n + 1;
         let mut toks = line.split([' ', '\t']).filter(|t| !t.is_empty());
         let Some(gate) = toks.next() else { continue };
         if gate.starts_with('#') {
             continue;
         }
+        let at = |gate: &str| (line_no, gate.to_string());
         if !valid_gate(gate) {
-            return Err(format!("line {n}: gate name `{gate}` is not [A-Za-z0-9][A-Za-z0-9._-]* of at most 64 characters"));
+            let (line, gate) = at(gate);
+            return Err(Error::GateName { line, gate });
         }
         if gates.iter().any(|(g, _)| g == gate) {
-            return Err(format!("line {n}: gate `{gate}` is declared twice"));
+            let (line, gate) = at(gate);
+            return Err(Error::Duplicate { line, gate });
         }
         let paths: Vec<String> = toks.map(String::from).collect();
         if paths.is_empty() {
-            return Err(format!("line {n}: gate `{gate}` declares no paths"));
+            let (line, gate) = at(gate);
+            return Err(Error::NoPaths { line, gate });
         }
         if paths.len() > MAX_SPEC_PATHS {
-            return Err(format!(
-                "line {n}: gate `{gate}` declares more than {MAX_SPEC_PATHS} paths"
-            ));
+            let (line, gate) = at(gate);
+            return Err(Error::TooManyPaths { line, gate });
         }
         for p in &paths {
-            if let Some(why) = path_error(p) {
-                return Err(format!("line {n}: {why}"));
+            if let Some((path, problem)) = path_error(p) {
+                return Err(Error::Path {
+                    line: line_no,
+                    path,
+                    problem,
+                });
             }
         }
         let paths = paths
@@ -152,7 +257,7 @@ pub fn parse_spec(bytes: &[u8]) -> Result<Spec, String> {
             .collect();
         gates.push((gate.to_string(), paths));
         if gates.len() > MAX_SPEC_GATES {
-            return Err(format!("declares more than {MAX_SPEC_GATES} gates"));
+            return Err(Error::TooManyGates);
         }
     }
     Ok(Spec { gates })

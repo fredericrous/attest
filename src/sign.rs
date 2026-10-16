@@ -65,28 +65,60 @@ fn find_principal(sig_file: &Path, allowed_signers: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `ssh-keygen -Y verify` over the exact signed bytes, as `principal` — or, when
-/// none is given, as whoever the signature says. `Ok` carries the identity the
-/// signature verified as; `Err` carries the reason it did not.
+/// Why a signature was not accepted. `Display` is the reason the verifier
+/// reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// The signature could not be handed to `ssh-keygen`.
+    TempFile,
+    /// No key in the signers file made it.
+    UnknownSigner { signers: PathBuf },
+    /// `ssh-keygen -Y verify` refused it.
+    DoesNotVerify { signer: String, signers: PathBuf },
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::TempFile => write!(f, "cannot create a temporary file for the signature"),
+            Error::UnknownSigner { signers } => write!(
+                f,
+                "signature was not made by any key in {}",
+                signers.display()
+            ),
+            Error::DoesNotVerify { signer, signers } => write!(
+                f,
+                "signature does not verify as {signer} against {}",
+                signers.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// `ssh-keygen -Y verify` over the exact signed bytes, in `namespace`, as
+/// `principal` — or, when none is given, as whoever the signature says. `Ok`
+/// carries the identity the signature verified as.
 pub fn verify(
     namespace: &str,
     payload: &str,
     sig: &str,
     allowed_signers: &Path,
     principal: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     use std::io::Write;
     let Some(sig_file) = SigFile::new(sig) else {
-        return Err("cannot create a temporary file for the signature".into());
+        return Err(Error::TempFile);
     };
     let signer = match principal {
         Some(p) => p.to_string(),
-        None => find_principal(&sig_file.0, allowed_signers).ok_or_else(|| {
-            format!(
-                "signature was not made by any key in {}",
-                allowed_signers.display()
-            )
-        })?,
+        None => {
+            find_principal(&sig_file.0, allowed_signers).ok_or_else(|| Error::UnknownSigner {
+                signers: allowed_signers.to_path_buf(),
+            })?
+        }
     };
     let ok = (|| {
         let mut child = Command::new("ssh-keygen")
@@ -106,9 +138,9 @@ pub fn verify(
     if ok {
         Ok(signer)
     } else {
-        Err(format!(
-            "signature does not verify as {signer} against {}",
-            allowed_signers.display()
-        ))
+        Err(Error::DoesNotVerify {
+            signer,
+            signers: allowed_signers.to_path_buf(),
+        })
     }
 }
