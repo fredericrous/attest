@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.1
 
 - **SPEC: `amont-provenance-v1`.** The format of the signed record amont
   publishes in `refs/notes/amont-provenance` (decisions ADR-0036): the plan
