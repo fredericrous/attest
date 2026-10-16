@@ -76,6 +76,9 @@ pub fn attestation(
         Err(AtError::Invalid(path, why)) => {
             log.push(format!("{path} {why}; no input fingerprints"))
         }
+        Err(AtError::Unlisted) => {
+            log.push("cannot list the signed tree; no input fingerprints".into())
+        }
     }
     if !absent.is_empty() {
         absent.sort();

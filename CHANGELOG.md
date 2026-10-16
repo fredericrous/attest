@@ -27,6 +27,9 @@
   producer that finds an invalid, ambiguous or unreadable `attest-inputs`
   attaches neither `input` lines nor a `canon` line. `sign.sh` attached a
   `canon` line all the same; amont never did.
+- **Whether a tree holds a spec comes from a listing**, as amont reads it:
+  a tree git cannot list has no known spec (`AtError::Unlisted`), which
+  opens no route, instead of looking like a tree with none.
 
 ## 1.5.1
 

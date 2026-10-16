@@ -423,17 +423,39 @@ pub enum AtError {
     Unreadable(&'static str),
     /// The spec at this path is invalid.
     Invalid(&'static str, Error),
+    /// git could not list the tree, so whether it holds a spec is unknown.
+    Unlisted,
 }
 
 /// The spec committed in `tree` and where it was found; `Ok(None)` when the
 /// tree has none. Read from the TREE, never the working copy: the bytes
 /// hashed into every fingerprint and the bytes parsed here are then the same
-/// object.
+/// object. Presence comes from a listing that must itself succeed, never
+/// from a `cat-file -e` probe, which cannot tell an absent file from a git
+/// that failed: "absent" opens the canonical route, and "cannot tell" must
+/// not.
 pub fn at(root: &Path, tree: &str) -> Result<Option<(&'static str, Spec)>, AtError> {
+    let listing = git::stdout_bytes_in(
+        root,
+        &[
+            "ls-tree",
+            "--full-tree",
+            tree,
+            "--",
+            SPEC_PATHS[0],
+            SPEC_PATHS[1],
+        ],
+    )
+    .ok_or(AtError::Unlisted)?;
     let present: Vec<&'static str> = SPEC_PATHS
         .iter()
         .copied()
-        .filter(|p| git::succeeds_in(root, &["cat-file", "-e", &format!("{tree}:{p}")]))
+        .filter(|p| {
+            listing
+                .split(|&b| b == b'\n')
+                .filter_map(|l| l.iter().position(|&b| b == b'\t').map(|i| &l[i + 1..]))
+                .any(|name| name == p.as_bytes())
+        })
         .collect();
     let path = match present.as_slice() {
         [] => return Ok(None),
@@ -613,6 +635,7 @@ pub fn check_coverage(
         Err(AtError::Unreadable(p)) | Err(AtError::Invalid(p, _)) => {
             return Err(CoverageError::Invalid(p))
         }
+        Err(AtError::Unlisted) => return Err(CoverageError::Unlisted),
     };
     let listing = git::stdout_bytes_in(
         root,
