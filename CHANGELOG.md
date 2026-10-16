@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0
 
 - **The actions run the binary** (decisions ADR-0037). `action.yml` runs
   `git-attest covered` and `sign/action.yml` runs `git-attest sign`, at the
