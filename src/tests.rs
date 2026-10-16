@@ -500,3 +500,117 @@ fn a_credential_in_a_remote_url_never_reaches_the_log() {
     );
     assert_eq!(scrub("ssh://git@host/r"), "ssh://host/r");
 }
+
+#[test]
+fn coverage_is_per_gate_by_real_ancestry() {
+    let spec = parse_spec(b"lint src docs/README.md\ntest src\n").unwrap();
+    let files: Vec<Vec<u8>> = [
+        "src/main.rs",
+        "srcx/other.rs",
+        "docs/README.md",
+        "docs/plans/p.md",
+        ".gitattributes",
+        ".github/attest-inputs",
+        "Cargo.toml",
+    ]
+    .iter()
+    .map(|f| f.as_bytes().to_vec())
+    .collect();
+    let req = |g: &[&str]| g.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let f = coverage(&spec, &req(&["lint", "test", "fmt"]), &files, |g| {
+        g != "test"
+    });
+    assert_eq!(f.undeclared, ["fmt"]);
+    assert_eq!(f.unfingerprintable, ["test"]);
+    // `srcx/` is not under `src/`; plans and the implicit inputs are exempt
+    assert_eq!(
+        f.uncovered,
+        vec![
+            (
+                "lint".to_string(),
+                vec!["srcx/other.rs".to_string(), "Cargo.toml".to_string()]
+            ),
+            (
+                "test".to_string(),
+                vec![
+                    "srcx/other.rs".to_string(),
+                    "docs/README.md".to_string(),
+                    "Cargo.toml".to_string()
+                ]
+            ),
+        ]
+    );
+    assert!(f
+        .render()
+        .contains("check-attest-inputs: lint: not covered:\n  srcx/other.rs\n"));
+    assert!(coverage(&spec, &req(&["lint"]), &files[..1], |_| true).is_empty());
+}
+
+/// A scratch repository with one commit: `src/main.rs`, a spec declaring
+/// `lint src`, and `.github/allowed_signers`.
+fn scratch_repo(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("git-attest-lib-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src/deep")).unwrap();
+    std::fs::create_dir_all(d.join(".github")).unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(d.join(".github/attest-inputs"), "lint src\n").unwrap();
+    std::fs::write(
+        d.join(".github/allowed_signers"),
+        "x namespaces=\"amont-attest\" k\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .current_dir(&d)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+            .status
+            .success());
+    };
+    git(&["init", "-q", "--template="]);
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    d
+}
+
+/// Every entry point answers for the repository it is handed, never for the
+/// process's working directory (here, this crate's own checkout).
+#[test]
+fn the_library_answers_for_the_repository_it_is_given() {
+    let repo = scratch_repo("cwd");
+    let sub = repo.join("src/deep");
+    let tree = {
+        let out = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "HEAD^{tree}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(
+        default_signers(&sub).map(|p| p.ends_with(".github/allowed_signers")),
+        Some(true)
+    );
+    let (path, spec) = crate::spec::at(&repo, &tree).unwrap().unwrap();
+    assert_eq!(path, ".github/attest-inputs");
+    assert!(fingerprint(&repo, &tree, &spec, "lint").is_ok());
+    assert!(canon(&repo, &tree).is_ok());
+    assert!(check_coverage(&repo, &tree, &["lint".to_string()]).is_ok());
+    let mut log = Vec::new();
+    let att = crate::produce::attestation(&repo, &tree, "lint", "p", "t", &mut log);
+    assert_eq!(att.inputs.len(), 1, "{log:?}");
+    assert_eq!(att.input_keys.len(), 2, "one input key, one canonical key");
+    let _ = std::fs::remove_dir_all(&repo);
+}

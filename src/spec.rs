@@ -374,3 +374,186 @@ pub fn at(root: &Path, tree: &str) -> Result<Option<(&'static str, Spec)>, AtErr
         .map(|spec| Some((path, spec)))
         .map_err(|e| AtError::Invalid(path, e))
 }
+
+// ---------------------------------------------------------------------------
+// Completeness: does a declaration cover every tracked file?
+// ---------------------------------------------------------------------------
+
+/// Paths no gate reads, exempt from the coverage check: the plans a change
+/// keeps rewriting. Everything else a repository tracks is either declared or
+/// the check fails.
+pub const EXEMPT: [&str; 1] = ["docs/plans/"];
+
+/// How many offending paths one gate lists before the rest are counted.
+const LIST_CAP: usize = 50;
+
+/// Why the coverage question cannot be answered. A guard that cannot answer
+/// fails, unlike the verifier, whose contract is fail-open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoverageError {
+    /// The tree holds no spec.
+    Missing,
+    /// Both locations hold one.
+    Ambiguous,
+    /// The spec at this path is unreadable or invalid.
+    Invalid(&'static str),
+    /// git could not list the tree, or it is empty.
+    Unlisted,
+}
+
+impl CoverageError {
+    /// The one line a person reads when the spec itself cannot be used.
+    pub fn render(&self, tree: &str) -> String {
+        match self {
+            CoverageError::Missing => format!(
+                "check-attest-inputs: no {} or {} on {tree}",
+                SPEC_PATHS[0], SPEC_PATHS[1]
+            ),
+            CoverageError::Ambiguous => format!(
+                "check-attest-inputs: both {} and {} exist on {tree}; that disables the route",
+                SPEC_PATHS[0], SPEC_PATHS[1]
+            ),
+            CoverageError::Invalid(path) => format!(
+                "check-attest-inputs: {path} is invalid on {tree} (one violation invalidates the whole spec; see attest SPEC, \"Input fingerprints\")"
+            ),
+            CoverageError::Unlisted => {
+                format!("check-attest-inputs: git could not list {tree}, or it is empty")
+            }
+        }
+    }
+}
+
+/// What [`check_coverage`] found. Empty means every required gate declares
+/// every tracked file.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Findings {
+    /// Required gates the spec does not declare at all.
+    pub undeclared: Vec<String>,
+    /// Declared gates that cannot be fingerprinted on the tree.
+    pub unfingerprintable: Vec<String>,
+    /// Per gate, the tracked files no declared path is, or is an ancestor of.
+    pub uncovered: Vec<(String, Vec<String>)>,
+}
+
+impl Findings {
+    /// Everything wrong, for stderr: every gate and path, indented, then the
+    /// two ways out.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for g in &self.undeclared {
+            out.push_str(&format!(
+                "check-attest-inputs: {g}: not declared in the spec\n"
+            ));
+        }
+        for g in &self.unfingerprintable {
+            out.push_str(&format!(
+                "check-attest-inputs: {g}: cannot be fingerprinted (a required path is missing)\n"
+            ));
+        }
+        for (g, paths) in &self.uncovered {
+            out.push_str(&format!("check-attest-inputs: {g}: not covered:\n"));
+            for p in paths.iter().take(LIST_CAP) {
+                out.push_str(&format!("  {p}\n"));
+            }
+            if paths.len() > LIST_CAP {
+                out.push_str(&format!("  ... and {} more\n", paths.len() - LIST_CAP));
+            }
+        }
+        out.push_str(
+            "check-attest-inputs: fix: declare each path above for that gate (a directory \
+             covers everything under it); only a path no gate reads may be exempt, and that \
+             is a code-review decision. An undeclared path makes CI and the hooks skip \
+             wrongly the day it changes.\n",
+        );
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.undeclared.is_empty() && self.unfingerprintable.is_empty() && self.uncovered.is_empty()
+    }
+}
+
+/// The files every fingerprint lists whatever a gate declares: both spec
+/// locations, and the root `.gitmodules` and `.gitattributes`.
+fn is_implicit(file: &[u8]) -> bool {
+    SPEC_PATHS.iter().any(|p| p.as_bytes() == file)
+        || file == b".gitmodules"
+        || file == b".gitattributes"
+}
+
+/// Is `file` covered by the declared path `decl`: the file itself, or a file
+/// under that directory? Bytes, not text: a name outside printable ASCII can
+/// never be declared and is covered only through an ASCII ancestor.
+fn covers(decl: &str, file: &[u8]) -> bool {
+    let d = decl.as_bytes();
+    file == d || (file.len() > d.len() && file.starts_with(d) && file[d.len()] == b'/')
+}
+
+/// The pure half of [`check_coverage`]: coverage of `files` by each required
+/// gate of `spec`, with the fingerprint question answered by
+/// `can_fingerprint`.
+pub fn coverage(
+    spec: &Spec,
+    required: &[String],
+    files: &[Vec<u8>],
+    can_fingerprint: impl Fn(&str) -> bool,
+) -> Findings {
+    let mut out = Findings::default();
+    for gate in required {
+        let Some(toks) = spec.paths_of(gate) else {
+            out.undeclared.push(gate.clone());
+            continue;
+        };
+        if !can_fingerprint(gate) {
+            out.unfingerprintable.push(gate.clone());
+        }
+        let missing: Vec<String> = files
+            .iter()
+            .filter(|f| !EXEMPT.iter().any(|e| f.starts_with(e.as_bytes())))
+            .filter(|f| !is_implicit(f))
+            .filter(|f| !toks.iter().any(|t| covers(&t.path, f)))
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect();
+        if !missing.is_empty() {
+            out.uncovered.push((gate.clone(), missing));
+        }
+    }
+    out
+}
+
+/// Do the required gates declare, completely, everything `tree` tracks?
+///
+/// Declared inputs are only as good as their completeness: a gate whose spec
+/// omits something it reads is skipped wrongly the day that something
+/// changes. This is the proof that closes the gap: per gate, by real
+/// ancestry, never by union and never by first path component. The spec is
+/// read from the tree, not the working copy.
+pub fn check_coverage(
+    root: &Path,
+    tree: &str,
+    required: &[String],
+) -> Result<Findings, CoverageError> {
+    let spec = match at(root, tree) {
+        Ok(Some((_, spec))) => spec,
+        Ok(None) => return Err(CoverageError::Missing),
+        Err(AtError::Ambiguous) => return Err(CoverageError::Ambiguous),
+        Err(AtError::Unreadable(p)) | Err(AtError::Invalid(p, _)) => {
+            return Err(CoverageError::Invalid(p))
+        }
+    };
+    let listing = git::stdout_bytes_in(
+        root,
+        &["ls-tree", "-r", "-z", "--full-tree", "--name-only", tree],
+    )
+    .filter(|l| !l.is_empty())
+    .ok_or(CoverageError::Unlisted)?;
+    let files: Vec<Vec<u8>> = listing
+        .split(|&b| b == 0)
+        .filter(|f| !f.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    Ok(coverage(&spec, required, &files, |gate| {
+        crate::fingerprint::fingerprint(root, tree, &spec, gate).is_ok()
+    }))
+}

@@ -17,6 +17,7 @@ git-attest — what a signed attestation covers for the tree checked out here
                      [--json | --github-output]
   git-attest explain [same flags]
   git-attest sign --gates \"NAMES\" [flags] < private-key   (see `git-attest sign --help`)
+  git-attest check-inputs --require GATE... [--tree REV]
 
   covered   print the covered gate names, or nothing. Always exits 0: every
             failure means \"run the tests\", which is the caller's default
@@ -24,6 +25,10 @@ git-attest — what a signed attestation covers for the tree checked out here
             handle.
   explain   print the same answer with the reasoning that produced it, on
             stderr. Use it when a skip you expected did not happen.
+  check-inputs
+            do the named gates declare, in attest-inputs, every file the tree
+            (default HEAD) tracks? Exit 0 yes, 1 a file is not covered, 2 the
+            spec or git cannot answer: a guard that cannot answer fails.
 
   --signers PATH    default: .forgejo/allowed_signers, then
                     .github/allowed_signers. A relative PATH is resolved from
@@ -130,6 +135,58 @@ fn as_json(gates: &[String]) -> String {
     out
 }
 
+/// `check-inputs --require <gate>... [--tree <rev>]`: the same flags and
+/// output as `amont attest check-inputs`.
+fn check_inputs(args: &[String]) -> u8 {
+    let mut tree = "HEAD".to_string();
+    let mut required = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tree" => match args.get(i + 1) {
+                Some(t) => {
+                    tree = t.clone();
+                    i += 1;
+                }
+                None => {
+                    eprintln!("git-attest: --tree needs a value");
+                    return 2;
+                }
+            },
+            "--require" => {
+                while let Some(g) = args.get(i + 1).filter(|a| !a.starts_with("--")) {
+                    required.push(g.clone());
+                    i += 1;
+                }
+            }
+            other => {
+                eprintln!("git-attest: unknown argument {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    if required.is_empty() {
+        eprintln!("git-attest: check-inputs needs --require <gate>...");
+        return 2;
+    }
+    let here = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match git_attest::spec::check_coverage(&here, &tree, &required) {
+        Err(e) => {
+            eprintln!("{}", e.render(&tree));
+            2
+        }
+        Ok(f) if f.is_empty() => {
+            println!("check-attest-inputs: ok");
+            0
+        }
+        Ok(f) => {
+            eprint!("{}", f.render());
+            1
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = run(&args);
@@ -152,6 +209,7 @@ fn run(args: &[String]) -> u8 {
         }
         "covered" | "explain" => {}
         "sign" => return cli_sign::run(&args[1..]),
+        "check-inputs" => return check_inputs(&args[1..]),
         other => {
             eprintln!("git-attest: unknown subcommand `{other}`");
             eprint!("{USAGE}");
