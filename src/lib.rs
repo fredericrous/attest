@@ -8,7 +8,8 @@
 //! - [`spec`]: the `attest-inputs` declaration and the canonical opt-out;
 //! - [`fingerprint`]: input fingerprints, the canonical tree, their note keys;
 //! - [`sign`]: `ssh-keygen -Y`, for any namespace;
-//! - [`notes`]: the notes refs as origin's mirror;
+//! - [`notes`]: the notes refs as origin's mirror, and publishing to them;
+//! - [`produce`]: what a producer signs for the gates that passed on a tree;
 //! - [`verify`]: what a valid attestation covers.
 //!
 //! Every entry point takes the repository it acts on as a path and never
@@ -20,6 +21,7 @@
 pub mod fingerprint;
 pub mod format;
 pub mod notes;
+pub mod produce;
 pub mod sign;
 pub mod spec;
 pub mod verify;

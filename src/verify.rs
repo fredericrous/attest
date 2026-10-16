@@ -20,7 +20,7 @@ use crate::format::{
 };
 use crate::git;
 use crate::notes::{sync_mirrors, Mirror};
-use crate::spec::{parse_spec, plan_exempt, PlanExempt, Spec, SPEC_PATHS};
+use crate::spec::{plan_exempt, AtError, PlanExempt, Spec, SPEC_PATHS};
 
 /// How many signatures one invocation verifies, over every candidate. A
 /// verification is one call of [`verify`]; blocks the cheap checks reject and
@@ -420,18 +420,10 @@ impl Judge<'_> {
 }
 
 /// The spec at the checked-out tree, or the reason there is none to use.
-/// Read from the TREE, never the working copy: the bytes hashed into every
-/// fingerprint and the bytes parsed here are then the same object.
 fn load_spec(root: &Path, head_tree: &str, trail: &mut Vec<String>) -> Option<Spec> {
-    let present: Vec<&str> = SPEC_PATHS
-        .iter()
-        .copied()
-        .filter(|p| git::succeeds_in(root, &["cat-file", "-e", &format!("{head_tree}:{p}")]))
-        .collect();
-    let path = match present.as_slice() {
-        [] => return None,
-        [one] => *one,
-        _ => {
+    match crate::spec::at(root, head_tree) {
+        Ok(found) => found.map(|(_, spec)| spec),
+        Err(AtError::Ambiguous) => {
             push_reason(
                 trail,
                 format!(
@@ -439,21 +431,16 @@ fn load_spec(root: &Path, head_tree: &str, trail: &mut Vec<String>) -> Option<Sp
                     SPEC_PATHS[0], SPEC_PATHS[1]
                 ),
             );
-            return None;
+            None
         }
-    };
-    let Some(bytes) =
-        git::stdout_bytes_in(root, &["cat-file", "blob", &format!("{head_tree}:{path}")])
-    else {
-        push_reason(
-            trail,
-            format!("cannot read {path} from HEAD's tree; input fingerprints disabled"),
-        );
-        return None;
-    };
-    match parse_spec(&bytes) {
-        Ok(spec) => Some(spec),
-        Err(why) => {
+        Err(AtError::Unreadable(path)) => {
+            push_reason(
+                trail,
+                format!("cannot read {path} from HEAD's tree; input fingerprints disabled"),
+            );
+            None
+        }
+        Err(AtError::Invalid(path, why)) => {
             push_reason(trail, format!("{path} {why}; input fingerprints disabled"));
             None
         }

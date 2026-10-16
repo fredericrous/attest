@@ -245,3 +245,269 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
     }
     states
 }
+
+// ---------------------------------------------------------------------------
+// Publishing (SPEC.md, "Producing")
+// ---------------------------------------------------------------------------
+
+/// How a publish is carried out. Every producer and every signed-notes ref
+/// (attestations, their inputs, provenance) goes through the same loop.
+pub struct Publish<'a> {
+    /// The remote to publish to.
+    pub remote: &'a str,
+    /// How many fetch-append-push rounds before a lost race is given up.
+    pub attempts: u32,
+    /// Wait between rounds, growing with the attempt (`sign.sh` in CI); a
+    /// hook on the commit path does not wait.
+    pub pause: bool,
+    /// The committer of the notes commit, for a runner with no identity of
+    /// its own; `None` uses the repository's.
+    pub identity: Option<(&'a str, &'a str)>,
+    /// Extra environment for the push itself (amont marks its own notes push
+    /// so its pre-push hook yields).
+    pub push_env: &'a [(&'a str, &'a str)],
+}
+
+/// What a publish came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Published {
+    /// The remote now holds every block.
+    Pushed,
+    /// Every block was already there: nothing was pushed.
+    AlreadyPresent,
+    /// Written to the local ref only (see [`publish_local`]).
+    Local,
+    /// The push failed, after retries if the failure was a lost race.
+    PushFailed,
+    /// A note could not be written at all.
+    Error,
+}
+
+/// Why a push that exited non-zero failed, read from git's stderr.
+///
+/// A lost race is worth one more fetch-and-try; an unreachable remote says
+/// nothing about the push itself; everything else is a refusal to report
+/// verbatim. An unrecognised message is `Refused`, the direction that never
+/// claims a push was merely unlucky.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PushFailure {
+    Raced,
+    Unreachable,
+    Refused,
+}
+
+/// The markers behind [`PushFailure`]. Raced wins over Unreachable: a
+/// message naming both is a race that happened on a reachable remote. A
+/// hook's own output rides the same stream, so Unreachable is read only from
+/// the lines git and ssh themselves print.
+pub fn classify_push(stderr: &str) -> PushFailure {
+    const RACED: [&str; 5] = [
+        "non-fast-forward",
+        "fetch first",
+        "stale info",
+        "cannot lock ref",
+        "failed to lock",
+    ];
+    const UNREACHABLE: [&str; 5] = [
+        "Could not resolve host",
+        "Connection refused",
+        "Connection timed out",
+        "unable to access",
+        "Could not read from remote repository",
+    ];
+    let own = |l: &&str| {
+        let l = l.trim_start();
+        l.starts_with("fatal:") || l.starts_with("ssh:") || l.starts_with("error:")
+    };
+    if RACED.iter().any(|m| stderr.contains(m)) {
+        PushFailure::Raced
+    } else if stderr
+        .lines()
+        .filter(own)
+        .any(|l| UNREACHABLE.iter().any(|m| l.contains(m)))
+    {
+        PushFailure::Unreachable
+    } else {
+        PushFailure::Refused
+    }
+}
+
+/// `git notes` writes a commit on the notes ref, and needs an identity.
+fn notes_git(root: &Path, identity: Option<(&str, &str)>) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root).stdin(Stdio::null());
+    if let Some((name, email)) = identity {
+        cmd.args([
+            "-c",
+            &format!("user.name={name}"),
+            "-c",
+            &format!("user.email={email}"),
+        ]);
+    }
+    cmd
+}
+
+/// Append `block` to the note on `object` in `notes_ref`, unless that exact
+/// block is already there. `Some(true)` when it appended, `Some(false)` when
+/// the block was present, `None` when the note could not be written.
+fn append(
+    root: &Path,
+    identity: Option<(&str, &str)>,
+    notes_ref: &str,
+    object: &str,
+    block: &str,
+) -> Option<bool> {
+    let existing =
+        git::stdout_in(root, &["notes", "--ref", notes_ref, "show", object]).unwrap_or_default();
+    if existing.contains(block.trim_end()) {
+        return Some(false);
+    }
+    notes_git(root, identity)
+        .args(["notes", "--ref", notes_ref, "append", "-m", block, object])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?
+        .success()
+        .then_some(true)
+}
+
+/// Attach each `(object, block)` on the REMOTE's copy of `notes_ref` (short
+/// name, under `refs/notes/`) and push. Never `notes add -f`, which erases
+/// every other producer's block, and never a push of the local ref, which
+/// would re-publish a block origin revoked:
+///
+/// 1. fetch the remote's ref into a temporary ref;
+/// 2. append each block that is not already there (ed25519 signatures are
+///    deterministic, so a re-run produces the same bytes);
+/// 3. push the temporary ref; a lost race goes back to 1.
+///
+/// After a push to `origin` the local ref is set to what was published;
+/// another remote's content never enters it. The temporary ref is removed on
+/// every path. `log` gets one line per retry or refusal, credentials in a
+/// remote URL removed.
+pub fn publish(
+    root: &Path,
+    how: &Publish,
+    notes_ref: &str,
+    items: &[(String, String)],
+    log: &mut Vec<String>,
+) -> Published {
+    let full = format!("refs/notes/{notes_ref}");
+    let tref = format!("attest-publish-{}-{notes_ref}", std::process::id());
+    let tfull = format!("refs/notes/{tref}");
+    let mut attempt = 0;
+    let outcome = loop {
+        attempt += 1;
+        let _ = git::succeeds_in(root, &["update-ref", "-d", &tfull]);
+        // A remote with no such ref yet fails the fetch, harmlessly: append
+        // then creates the note from nothing.
+        let _ = git::succeeds_in(
+            root,
+            &["fetch", "--quiet", how.remote, &format!("+{full}:{tfull}")],
+        );
+        let mut appended = false;
+        for (object, block) in items {
+            match append(root, how.identity, &tref, object, block) {
+                Some(true) => appended = true,
+                Some(false) => {}
+                None => return cleanup(root, &tfull, Published::Error),
+            }
+        }
+        if !appended {
+            break Published::AlreadyPresent;
+        }
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(["push", "--quiet", how.remote, &format!("{tfull}:{full}")])
+            .envs(how.push_env.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .output();
+        let Ok(out) = out else {
+            log.push(format!("push of {full} could not run git"));
+            break Published::PushFailed;
+        };
+        if out.status.success() {
+            if how.remote == "origin" {
+                let _ = git::succeeds_in(root, &["update-ref", &full, &tfull]);
+            }
+            break Published::Pushed;
+        }
+        let why = scrub(&String::from_utf8_lossy(&out.stderr));
+        match classify_push(&why) {
+            PushFailure::Raced if attempt < how.attempts => {
+                log.push(format!(
+                    "push of {full} rejected, another job attested this tree meanwhile; retrying"
+                ));
+                if how.pause {
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        u64::from(attempt) + u64::from(std::process::id() % 3),
+                    ));
+                }
+            }
+            PushFailure::Raced => {
+                log.push(format!("gave up on {full} after {attempt} attempts: {why}"));
+                break Published::PushFailed;
+            }
+            _ => {
+                log.push(format!("push of {full} refused: {why}"));
+                break Published::PushFailed;
+            }
+        }
+    };
+    cleanup(root, &tfull, outcome)
+}
+
+fn cleanup(root: &Path, tfull: &str, outcome: Published) -> Published {
+    let _ = git::succeeds_in(root, &["update-ref", "-d", tfull]);
+    outcome
+}
+
+/// git's stderr on one line, with any `user:token@` in a remote URL removed.
+pub(crate) fn scrub(stderr: &str) -> String {
+    let mut out = String::new();
+    for word in stderr.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        match word.find("://") {
+            Some(i) => {
+                let (scheme, rest) = word.split_at(i + 3);
+                let host_start = match rest.find('/') {
+                    Some(slash) => rest[..slash].rfind('@').map(|a| a + 1).unwrap_or(0),
+                    None => rest.rfind('@').map(|a| a + 1).unwrap_or(0),
+                };
+                out.push_str(scheme);
+                out.push_str(&rest[host_start..]);
+            }
+            None => out.push_str(word),
+        }
+    }
+    out
+}
+
+/// The same, into the local `notes_ref` only, with no remote involved: what
+/// `sign --no-push` writes under `refs/notes/attest-local/`.
+pub fn publish_local(
+    root: &Path,
+    identity: Option<(&str, &str)>,
+    notes_ref: &str,
+    items: &[(String, String)],
+) -> Published {
+    let mut appended = false;
+    for (object, block) in items {
+        match append(root, identity, notes_ref, object, block) {
+            Some(true) => appended = true,
+            Some(false) => {}
+            None => return Published::Error,
+        }
+    }
+    if appended {
+        Published::Local
+    } else {
+        Published::AlreadyPresent
+    }
+}

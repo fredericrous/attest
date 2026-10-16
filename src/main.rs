@@ -5,6 +5,8 @@
 //! else: CI that is neither GitHub nor Forgejo, and a laptop asking why a skip
 //! did not happen.
 
+mod cli_sign;
+
 use git_attest::{format, verify as attest};
 
 const USAGE: &str = "\
@@ -14,6 +16,7 @@ git-attest — what a signed attestation covers for the tree checked out here
                      [--anywhere \"NAMES\"] [--include-local]
                      [--json | --github-output]
   git-attest explain [same flags]
+  git-attest sign --gates \"NAMES\" [flags] < private-key   (see `git-attest sign --help`)
 
   covered   print the covered gate names, or nothing. Always exits 0: every
             failure means \"run the tests\", which is the caller's default
@@ -148,6 +151,7 @@ fn run(args: &[String]) -> u8 {
             return 0;
         }
         "covered" | "explain" => {}
+        "sign" => return cli_sign::run(&args[1..]),
         other => {
             eprintln!("git-attest: unknown subcommand `{other}`");
             eprint!("{USAGE}");

@@ -159,3 +159,17 @@ pub fn canon_key_preimage(canon: &str) -> String {
 pub fn canon_key(root: &Path, canon: &str) -> Result<String, Error> {
     hash(root, canon_key_preimage(canon).as_bytes())
 }
+
+/// The optional paths `gate` declares that `tree` does not hold: their
+/// absence is part of its fingerprint, and a producer names them once so a
+/// typo stands out. `ls-tree`, not `cat-file -e`: a gitlink whose commit is
+/// not in this repository is present all the same.
+pub fn absent_optional(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Vec<String> {
+    spec.paths_of(gate)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|t| t.optional)
+        .filter(|t| git::stdout_in(root, &["ls-tree", tree, "--", &t.path]).is_none())
+        .map(|t| t.path.clone())
+        .collect()
+}

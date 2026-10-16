@@ -83,12 +83,16 @@ compat: ## prove released verifiers degrade safely on newer notes
 	@cargo build -q --release
 	@./tests/compat-fields.sh "$(PWD)/target/release/git-attest covered" new
 
-sign-test: ## the producer's fixtures (sign/sign.sh against a bare origin), read back by both verifiers
+sign-test: ## the producer's fixtures (sign/sign.sh and git-attest sign against a bare origin), read back by both verifiers
 	cargo build --release
 	@echo "--- sign/sign.sh, read by verify.sh ---"
 	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ./tests/sign.sh
 	@echo "--- sign/sign.sh, read by git-attest ---"
 	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_IMPL="$(PWD)/target/release/git-attest covered" ./tests/sign.sh
+	@echo "--- git-attest sign, read by verify.sh ---"
+	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_SIGN="$(PWD)/target/release/git-attest sign" ./tests/sign.sh
+	@echo "--- git-attest sign, read by git-attest ---"
+	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_SIGN="$(PWD)/target/release/git-attest sign" ATTEST_IMPL="$(PWD)/target/release/git-attest covered" ./tests/sign.sh
 
 check: lint test conformance compat sign-test ## everything CI runs
 

@@ -195,3 +195,36 @@ pub fn canon_claim(payload: &str) -> Option<&str> {
         (f.len() == 2 && f[0] == "canon" && is_oid(f[1])).then(|| f[1])
     })
 }
+
+/// The payload of an attestation, in the exact shape SPEC.md gives: `tree`,
+/// `gates`, `platform`, the `input` lines in spec order, `canon`, then the
+/// producer line, each followed by LF. The same inputs give the same bytes,
+/// so a re-run recognises its own block.
+pub fn payload(
+    tree: &str,
+    gates: &str,
+    platform: &str,
+    inputs: &[(String, String)],
+    canon: Option<&str>,
+    producer: &str,
+) -> String {
+    let mut out = format!("{FORMAT}\ntree {tree}\ngates {gates}\nplatform {platform}\n");
+    for (gate, fp) in inputs {
+        out.push_str(&format!("input {gate} {fp}\n"));
+    }
+    if let Some(c) = canon {
+        out.push_str(&format!("canon {c}\n"));
+    }
+    out.push_str(&format!("amont {producer}\n"));
+    out
+}
+
+/// A signed block as a note holds it: the payload without its trailing
+/// newline, a blank line, the armored signature without its own.
+pub fn block(payload: &str, signature: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        payload.trim_end_matches('\n'),
+        signature.trim_end_matches('\n')
+    )
+}

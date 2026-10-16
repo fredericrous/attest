@@ -431,3 +431,72 @@ fn a_canon_claim_is_two_fields_and_a_real_oid() {
     assert_eq!(canon_claim(&format!("canon {O1}\ncanon {O2}\n")), Some(O1));
     assert_eq!(canon_key_preimage(O1), format!("amont-attest-canon {O1}\n"));
 }
+
+#[test]
+fn a_payload_has_the_spec_shape_and_a_block_one_blank_line() {
+    let inputs = vec![("lint".to_string(), O1.to_string())];
+    let p = payload(
+        "t0",
+        "lint test",
+        "x86_64-linux",
+        &inputs,
+        Some(O2),
+        "attest-sign",
+    );
+    assert_eq!(
+        p,
+        format!("amont-attest-v2\ntree t0\ngates lint test\nplatform x86_64-linux\ninput lint {O1}\ncanon {O2}\namont attest-sign\n")
+    );
+    assert_eq!(
+        payload("t", "g", "p", &[], None, "x"),
+        "amont-attest-v2\ntree t\ngates g\nplatform p\namont x\n"
+    );
+    let b = crate::format::block(&p, &format!("{SIG}\n"));
+    let (back, sig) = split_note(&b).unwrap();
+    assert_eq!(back, p, "the block splits back into the signed bytes");
+    assert_eq!(sig.trim_end(), SIG);
+}
+
+#[test]
+fn a_gate_list_is_one_space_between_names() {
+    use crate::produce::gate_list;
+    assert_eq!(gate_list("  a\tb\n\nc  "), "a b c");
+    assert_eq!(gate_list(" \n "), "");
+}
+
+#[test]
+fn a_push_failure_is_raced_unreachable_or_refused() {
+    use crate::notes::{classify_push, PushFailure};
+    assert_eq!(
+        classify_push(" ! [rejected] x (non-fast-forward)"),
+        PushFailure::Raced
+    );
+    assert_eq!(
+        classify_push("error: failed to push some refs (fetch first)"),
+        PushFailure::Raced
+    );
+    assert_eq!(
+        classify_push("fatal: unable to access 'https://h/': Could not resolve host: h"),
+        PushFailure::Unreachable
+    );
+    // a hook's own output naming a connection is not the remote being down
+    assert_eq!(
+        classify_push("remote: Connection refused by the gate\nerror: hook declined"),
+        PushFailure::Refused
+    );
+    // a race on a reachable remote is a race
+    assert_eq!(
+        classify_push("fatal: unable to access\n non-fast-forward"),
+        PushFailure::Raced
+    );
+}
+
+#[test]
+fn a_credential_in_a_remote_url_never_reaches_the_log() {
+    use crate::notes::scrub;
+    assert_eq!(
+        scrub("fatal: unable to access 'https://x-access-token:s3cr3t@github.com/o/r/':\n  denied"),
+        "fatal: unable to access 'https://github.com/o/r/': denied"
+    );
+    assert_eq!(scrub("ssh://git@host/r"), "ssh://host/r");
+}

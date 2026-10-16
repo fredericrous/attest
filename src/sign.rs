@@ -12,8 +12,14 @@ struct SigFile(PathBuf);
 impl SigFile {
     fn new(sig: &str) -> Option<Self> {
         use std::io::Write;
+        // The nanosecond varies the name per call, so a squatter on a shared
+        // temp dir can make one call lose a race, never hold every call off.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "attest-verify-{}-{:p}.sig",
+            "attest-verify-{}-{:p}-{nonce}.sig",
             std::process::id(),
             &sig
         ));
@@ -76,6 +82,13 @@ pub enum Error {
     UnknownSigner { signers: PathBuf },
     /// `ssh-keygen -Y verify` refused it.
     DoesNotVerify { signer: String, signers: PathBuf },
+    /// `ssh-keygen -y` cannot load the private key unencrypted.
+    KeyUnusable,
+    /// The key loads but is not ed25519, the one type whose signatures are
+    /// deterministic, which is what lets a re-run recognise its own block.
+    NotEd25519 { kind: String },
+    /// `ssh-keygen -Y sign` failed or printed no signature.
+    SignFailed,
 }
 
 impl std::fmt::Display for Error {
@@ -92,6 +105,14 @@ impl std::fmt::Display for Error {
                 "signature does not verify as {signer} against {}",
                 signers.display()
             ),
+            Error::KeyUnusable => write!(
+                f,
+                "not a usable unencrypted OpenSSH private key (passphrase-protected? a .pub pasted by mistake?)"
+            ),
+            Error::NotEd25519 { kind } => {
+                write!(f, "only ed25519 keys are supported (this one is {kind})")
+            }
+            Error::SignFailed => write!(f, "ssh-keygen could not sign"),
         }
     }
 }
@@ -142,5 +163,54 @@ pub fn verify(
             signer,
             signers: allowed_signers.to_path_buf(),
         })
+    }
+}
+
+/// The public half of the private key at `key`, checked to be ed25519.
+/// `-P ''` fails at once on a passphrase-protected key instead of prompting.
+pub fn public_key(key: &Path) -> Result<String, Error> {
+    let out = Command::new("ssh-keygen")
+        .args(["-y", "-P", "", "-f"])
+        .arg(key)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| Error::KeyUnusable)?;
+    if !out.status.success() {
+        return Err(Error::KeyUnusable);
+    }
+    let public = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !public.starts_with("ssh-ed25519 ") {
+        let kind = public.split(' ').next().unwrap_or("").to_string();
+        return Err(Error::NotEd25519 { kind });
+    }
+    Ok(public)
+}
+
+/// `ssh-keygen -Y sign` over `payload` in `namespace` with the private key at
+/// `key`: the armored signature, without its final newline. The payload goes
+/// on stdin, so nothing is written next to it.
+pub fn sign(namespace: &str, payload: &str, key: &Path) -> Result<String, Error> {
+    use std::io::Write;
+    let mut child = Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-n", namespace, "-f"])
+        .arg(key)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Error::SignFailed)?;
+    child
+        .stdin
+        .take()
+        .ok_or(Error::SignFailed)?
+        .write_all(payload.as_bytes())
+        .map_err(|_| Error::SignFailed)?;
+    let out = child.wait_with_output().map_err(|_| Error::SignFailed)?;
+    let sig = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+    if out.status.success() && sig.starts_with(crate::format::BEGIN) {
+        Ok(sig)
+    } else {
+        Err(Error::SignFailed)
     }
 }

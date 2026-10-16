@@ -339,3 +339,38 @@ pub fn plan_exempt(root: &Path, tree: &str) -> PlanExempt {
         None => PlanExempt::Unreadable,
     }
 }
+
+/// Why a tree has a spec that cannot be used. Each disables the
+/// input-fingerprint route only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AtError {
+    /// Both locations hold a spec.
+    Ambiguous,
+    /// The spec at this path could not be read from the tree.
+    Unreadable(&'static str),
+    /// The spec at this path is invalid.
+    Invalid(&'static str, Error),
+}
+
+/// The spec committed in `tree` and where it was found; `Ok(None)` when the
+/// tree has none. Read from the TREE, never the working copy: the bytes
+/// hashed into every fingerprint and the bytes parsed here are then the same
+/// object.
+pub fn at(root: &Path, tree: &str) -> Result<Option<(&'static str, Spec)>, AtError> {
+    let present: Vec<&'static str> = SPEC_PATHS
+        .iter()
+        .copied()
+        .filter(|p| git::succeeds_in(root, &["cat-file", "-e", &format!("{tree}:{p}")]))
+        .collect();
+    let path = match present.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        _ => return Err(AtError::Ambiguous),
+    };
+    let bytes = git::stdout_bytes_in(root, &["cat-file", "blob", &format!("{tree}:{path}")])
+        .ok_or(AtError::Unreadable(path))?;
+    parse_spec(&bytes)
+        .map(|spec| Some((path, spec)))
+        .map_err(|e| AtError::Invalid(path, e))
+}
