@@ -11,7 +11,7 @@ lint: ## rustfmt + clippy + shellcheck
 	@./scripts/help-lists-every-flag.sh
 	@./scripts/platform-tables-match.sh
 	@if command -v shellcheck > /dev/null; then \
-	    shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git tests/fake/* scripts/*.sh; \
+	    shellcheck verify.sh sign/sign.sh fetch.sh tests/*.sh tests/fault/git tests/fake/* scripts/*.sh; \
 	  else \
 	    echo "  (shellcheck not installed — skipped)"; \
 	  fi
@@ -99,7 +99,10 @@ sign-test: ## the producer's fixtures (sign/sign.sh and git-attest sign against 
 	@echo "--- git-attest sign, read by git-attest ---"
 	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_SIGN="$(PWD)/target/release/git-attest sign" ATTEST_IMPL="$(PWD)/target/release/git-attest covered" ./tests/sign.sh
 
-check: lint test conformance compat sign-test ## everything CI runs
+fetch-test: ## fetch.sh against a release served from file://, RELEASE's shape, the deprecation lines
+	@./tests/fetch.sh
+
+check: lint test conformance compat sign-test fetch-test ## everything CI runs
 
 fmt: ## format
 	cargo fmt --all
@@ -110,4 +113,4 @@ msrv: ## prove the rust-version floor in Cargo.toml is real
 	  rustup toolchain install "$$v" --profile minimal 2> /dev/null || true; \
 	  cargo "+$$v" check --locked
 
-.PHONY: help lint test conformance compat sign-test check fmt msrv
+.PHONY: help lint test conformance compat sign-test fetch-test check fmt msrv

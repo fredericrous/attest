@@ -66,6 +66,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Deprecated since 1.7.0 (decisions ADR-0037): one line on stderr, even under
+# --quiet, and stdout is untouched. The actions set ATTEST_NO_DEPRECATION when
+# they fall back here, having already warned why.
+if [ -z "${ATTEST_NO_DEPRECATION:-}" ]; then
+    msg='verify.sh is deprecated and goes away in 2.0.0; run git-attest covered, which takes the same flags and prints the same lines'
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        printf '::warning title=attest::%s\n' "$msg" >&2
+    else
+        printf 'attest: %s\n' "$msg" >&2
+    fi
+fi
+
 # A producer writes its note to BOTH the tree and the commit, so the candidate
 # loop below meets the same note twice and would otherwise report every
 # rejection twice — which reads like two problems rather than one seen twice.

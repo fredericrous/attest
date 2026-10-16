@@ -91,6 +91,25 @@ commit — each release's notes name it:
 - uses: fredericrous/attest@<sha>  # v1.x.y
 ```
 
+### What the action runs
+
+Both actions run `git-attest`, at the version [`RELEASE`](RELEASE) names, and
+only an archive whose sha256 is the one written there: the commit you pin
+names the bytes it runs, and a swapped release asset is refused. Linux x86_64
+runners take the static musl build, so an old glibc or an Alpine `container:`
+job runs it too. The archive is kept in the runner's tool cache and checked
+again on every use.
+
+They still fail open. No download, a digest mismatch, a runner with no
+release asset, a binary that will not run, a run that fails or writes no
+answer: each prints one warning, and `verify.sh` / `sign.sh` (`git` and
+`ssh-keygen`, nothing else) answer instead. A flaky network costs at most a
+skip, never a gate and never the job.
+
+The `binary:` input is **test-only**: it runs a binary you built in place of
+the pinned one (attest's own CI tests each branch that way) and prints a
+notice saying so.
+
 ## What gets skipped, and when
 
 The gate name is the whole contract between your hook and your CI step. A hook
@@ -219,10 +238,12 @@ conviction: trust what was verified, never what was reported.
 | | |
 |---|---|
 | [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format, input fingerprints included |
-| [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo |
-| [`sign/`](sign/) | the CI producer: `sign/action.yml` wraps `sign/sign.sh`, which `git-attest sign` replaces |
+| [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo: runs `git-attest covered` |
+| [`sign/`](sign/) | the CI producer: `sign/action.yml` runs `git-attest sign` |
+| [`RELEASE`](RELEASE) | the `git-attest` release both actions run, and each archive's sha256 |
+| [`fetch.sh`](fetch.sh) | how the actions get that binary: cache or download, digest check, a proof it runs |
 | [`.github/attest-inputs`](.github/attest-inputs) | this repository's own input spec: the dogfood, and a template |
-| [`verify.sh`](verify.sh) | the verifier the action runs. `git` and `ssh-keygen`, nothing else |
+| [`verify.sh`](verify.sh), [`sign/sign.sh`](sign/sign.sh) | the shell fallback the actions use when the binary cannot answer; deprecated as entry points, gone in 2.0.0 |
 | `src/` | the `git_attest` library, the one implementation of the format (decisions ADR-0037) that amont links, and `git-attest`, its command line |
 | [`tests/conformance.sh`](tests/conformance.sh) | the fixtures both implementations must pass |
 
@@ -270,6 +291,23 @@ replaces, kept so the suite can prove it is not vacuous. Cases marked
 `(defect N)` must fail against it. Please don't fix it. `tests/compat/` holds
 the 1.1.0 verifier, frozen, for the same reason: `make compat` proves a
 one-block reader degrades safely on a multi-block note. `tests/sign.sh` is the
-producer's suite.
+producer's suite, `tests/fetch.sh` the actions' way to the binary.
+
+### Releasing
+
+The tagged commit must carry the digests of the archives it ships, and builds
+are not reproducible, so a release is built before it is tagged:
+
+1. A release PR bumps the version (`Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`).
+2. Run `prepare-release` on its branch
+   (`gh workflow run prepare-release.yaml --ref <branch>`): it builds the six
+   archives into a draft release and hands back `RELEASE`; commit it on the
+   branch.
+3. Merge on green and push the `vX.Y.Z` tag on the merge commit. `release`
+   publishes the draft only if its archives have the digests the tagged
+   `RELEASE` names, and publishes the crate.
+4. Once amont's CI has passed on the new tag, run `move-major`
+   (`gh workflow run move-major.yaml -f tag=vX.Y.Z`) to move `v1`. Rollback
+   is the same with the previous tag.
 
 MIT.

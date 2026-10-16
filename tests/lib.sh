@@ -43,6 +43,10 @@ OS=${PLATFORM##*-}
 
 PASS=0; FAIL=0; FAILED_CASES=
 
+# The suites run verify.sh and sign.sh hundreds of times; their deprecation
+# line is tested once, in tests/fetch.sh.
+ATTEST_NO_DEPRECATION=1; export ATTEST_NO_DEPRECATION
+
 # Three ed25519 keys: the signer, a second signer for the same file, and a
 # stranger whose key is in no file.
 gen_keys() {

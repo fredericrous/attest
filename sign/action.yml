@@ -77,6 +77,13 @@ inputs:
     description: How many times to retry a push rejected because another job attested the same tree meanwhile.
     required: false
     default: "5"
+  binary:
+    description: >-
+      TEST-ONLY: a git-attest binary to run instead of the pinned release,
+      relative to the workspace (see the verifying action). Setting it prints
+      a notice.
+    required: false
+    default: ""
 
 outputs:
   status:
@@ -115,15 +122,17 @@ runs:
         ATTEST_ALLOW_DIRTY: ${{ inputs.allow-dirty }}
         ATTEST_PRODUCER: ${{ inputs.producer }}
         ATTEST_ATTEMPTS: ${{ inputs.attempts }}
+        ATTEST_BINARY: ${{ inputs.binary }}
       run: |
         set -u
         # The key leaves the ENVIRONMENT first: a step's env is inherited by
         # every process it starts — git, ssh-keygen, any hook or credential
         # helper — so it is copied into a shell variable and unset. From there
-        # it reaches sign.sh on stdin only: printf is a builtin, so it is never
-        # on an argv, and never in the script text. (sign.sh then holds it in a
-        # 0600 file of its own under a 0700 temporary directory, which it
-        # removes on every exit — ssh-keygen reads keys from nowhere else.)
+        # it reaches `git-attest sign` (or sign.sh) on stdin only: printf is a
+        # builtin, so it is never on an argv, and never in the script text.
+        # (Each then holds it in a 0600 file of its own under a private
+        # temporary directory, removed on every exit — ssh-keygen reads keys
+        # from nowhere else.)
         key=$ATTEST_KEY
         unset ATTEST_KEY
         # Positional parameters rather than a bash array (bash 3.2 on macOS
@@ -136,10 +145,40 @@ runs:
         if [ -n "$ATTEST_ATTEMPTS" ]; then set -- "$@" --attempts "$ATTEST_ATTEMPTS"; fi
         [ "$ATTEST_PUSH" = true ]        || set -- "$@" --no-push
         [ "$ATTEST_ALLOW_DIRTY" != true ] || set -- "$@" --allow-dirty
-        # Outputs exist whatever happens; a script that could not even start
-        # still yields a well-formed, negative answer.
-        {
-          printf '%s' "$key" \
-            | bash "$GITHUB_ACTION_PATH/sign.sh" --github-output --gates "$ATTEST_GATES" "$@" \
-            || printf 'status=error\nsigned=false\npushed=false\ngates=\ninputs=0/0\n'
-        } >> "$GITHUB_OUTPUT"
+        # The binary: the pinned release, or (tests only) the one given.
+        bin= why=
+        if [ -n "$ATTEST_BINARY" ]; then
+          echo "::notice title=attest::binary: is test-only; running $ATTEST_BINARY, not the pinned release"
+          bin=$ATTEST_BINARY
+        else
+          err=$(mktemp)
+          bin=$(bash "$GITHUB_ACTION_PATH/../fetch.sh" 2> "$err") || bin=
+          cat "$err" >&2
+          if [ -z "$bin" ]; then
+            why=$(tail -n 1 "$err" | sed 's/^attest: //')
+            [ -n "$why" ] || why="fetch.sh named no binary"
+          fi
+          rm -f "$err"
+        fi
+        # GitHub runs this under `-e`: every status below is tested, not left
+        # to end the step.
+        out=
+        if [ -n "$bin" ]; then
+          if out=$(printf '%s' "$key" | "$bin" sign --github-output --gates "$ATTEST_GATES" "$@"); then
+            case $'\n'"$out" in
+              *$'\n'status=*) ;;
+              *) why="git-attest sign wrote no status= line" ;;
+            esac
+          else
+            why="git-attest sign exited $?"
+          fi
+        fi
+        if [ -n "$why" ]; then
+          echo "::warning title=attest::$why; sign.sh signs instead"
+          # Outputs exist whatever happens; a script that could not even start
+          # still yields a well-formed, negative answer.
+          out=$(printf '%s' "$key" \
+            | ATTEST_NO_DEPRECATION=1 bash "$GITHUB_ACTION_PATH/sign.sh" --github-output --gates "$ATTEST_GATES" "$@") \
+            || out=$(printf '%s\nstatus=error\nsigned=false\npushed=false\ngates=\ninputs=0/0' "$out")
+        fi
+        printf '%s\n' "$out" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,107 @@
+# Step 1 of a release: build the archives into a DRAFT release and hand back
+# the RELEASE file that pins them (decisions ADR-0037).
+#
+# Run it on the release PR's branch, after that branch has bumped the version
+# in Cargo.toml and Cargo.lock:
+#
+#   gh workflow run prepare-release.yaml --ref chore/release-X.Y.Z
+#
+# then commit the `RELEASE` artifact (also printed in the run's summary) on
+# that branch. CI runs on the PR as on any; the person merges it and pushes
+# the tag on the merge commit, and release.yaml publishes this draft only if
+# its archives still have the digests the tagged RELEASE names. Builds are not
+# reproducible, so the tag publishes these bytes, never a rebuild.
+#
+# Re-running replaces the draft (and so its digests); commit the new RELEASE.
+name: prepare-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
+          printf '%s\n' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || {
+            echo "::error::Cargo.toml's version '$version' is not X.Y.Z"; exit 1; }
+          # A version is released once. Its tag or a published release means
+          # the branch forgot to bump.
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/v$version" > /dev/null 2>&1; then
+            echo "::error::v$version is already tagged; bump Cargo.toml first"; exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" > /dev/null 2>&1; then
+            echo "::error::v$version is already released"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: guard
+    uses: ./.github/workflows/build.yaml
+    with:
+      version: ${{ needs.guard.outputs.version }}
+
+  draft:
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { path: art, merge-multiple: true }
+      - name: the draft release, and the RELEASE that pins it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -eu
+          (cd art && sha256sum ./*.tar.gz > SHA256SUMS)
+          # The header is the committed one, so a release PR's diff is the
+          # version and the digests and nothing else.
+          {
+            grep '^#' RELEASE
+            echo "version $VERSION"
+            for f in art/git-attest-"$VERSION"-*.tar.gz; do
+              t=${f#art/git-attest-"$VERSION"-}; t=${t%.tar.gz}
+              printf '%-26s %s\n' "$t" "$(sha256sum < "$f" | awk '{print $1}')"
+            done | sort
+          } > "$RUNNER_TEMP/RELEASE"
+          # One draft per version: drafts are invisible to tags, so a re-run
+          # would otherwise leave two, and release.yaml would not know which.
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.draft and .tag_name == \"v$VERSION\") | .id" \
+            | while read -r id; do
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+              done
+          gh release create "v$VERSION" --draft --target "$GITHUB_SHA" --title "v$VERSION" \
+            --notes "Draft built from $GITHUB_SHA by prepare-release; published by the v$VERSION tag." \
+            art/*.tar.gz art/SHA256SUMS
+          {
+            echo "## RELEASE for v$VERSION"
+            echo
+            echo "Commit this file as \`RELEASE\` on \`$GITHUB_REF_NAME\`:"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/RELEASE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: RELEASE
+          path: ${{ runner.temp }}/RELEASE
