@@ -1,0 +1,82 @@
+# Step 3 of a release: move the major alias, once the canary has passed.
+#
+# `uses: fredericrous/attest@v1` is how most consumers pin, so `v1` reaches
+# the fleet the moment it moves. It therefore moves only by hand, AFTER amont
+# (the canary) has pinned the new tag and its CI has passed on it:
+#
+#   gh workflow run move-major.yaml -f tag=vX.Y.Z
+#
+# Rollback is the same command with the previous tag.
+#
+# This is the one tag that legitimately moves — it is a pointer, not a release
+# identity, and release.yaml's `v*.*.*` trigger means moving it publishes
+# nothing and starts no run.
+name: move-major
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The released tag the major alias should name, e.g. v1.7.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  move:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: move the major alias
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          # Refuse rather than invent: an empty version once became a tag
+          # literally named `v`.
+          printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || {
+            echo "::error::tag must be vX.Y.Z, not '$TAG'"; exit 1; }
+          major=${TAG%%.*}
+          # Only a PUBLISHED release: the releases/tags route does not see drafts.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /dev/null || {
+            echo "::error::$TAG is not a published release"; exit 1; }
+          # The commit the tag names (peeled, should it be annotated).
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          # From 1.7.0 the commit pins its own binary; one that pins another
+          # version would run bytes its tag does not name. (A rollback to
+          # 1.6.0 or older has no RELEASE, and runs the shell scripts.)
+          if pinned=$(gh api -H 'Accept: application/vnd.github.raw' \
+                "repos/$GITHUB_REPOSITORY/contents/RELEASE?ref=$sha" 2> /dev/null); then
+            v=$(printf '%s\n' "$pinned" | awk '$1 == "version" {print $2; exit}')
+            [ "v$v" = "$TAG" ] || { echo "::error::$TAG's RELEASE pins $v"; exit 1; }
+          fi
+
+          # The git refs API, NOT `git push`.
+          #
+          # GITHUB_TOKEN is refused when it pushes a ref whose commit carries a
+          # .github/workflows/ file differing from the default branch:
+          #
+          #   refusing to allow a GitHub App to create or update workflow
+          #   `.github/workflows/release.yaml` without `workflows` permission
+          #
+          # which fires on a rollback, or a tag cut from a hotfix branch, i.e.
+          # exactly when somebody is already dealing with something else.
+          # Updating a ref moves a pointer and never presents file contents,
+          # so the guard does not apply. No checkout is needed either.
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$major" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$major" \
+              -f sha="$sha" -F force=true > /dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$major" -f sha="$sha" > /dev/null
+          fi
+
+          # Verify the EFFECT, and that it is the RIGHT ref.
+          got=$(gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$major" --jq .object.sha)
+          [ "$got" = "$sha" ] || {
+            echo "::error::$major points at $got, expected $sha"; exit 1; }
+          echo "$major -> $got ($TAG)"

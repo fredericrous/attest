@@ -45,7 +45,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - id: shellcheck
         if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-shellcheck') }}
-        run: shellcheck verify.sh sign/sign.sh tests/*.sh tests/fault/git tests/fake/* scripts/*.sh
+        run: shellcheck verify.sh sign/sign.sh fetch.sh tests/*.sh tests/fault/git tests/fake/* scripts/*.sh
       # Never behind an attest skip: cheap, and a drift they catch would
       # otherwise ride on a fingerprint that does not name them.
       - name: every flag is in its --help
@@ -97,6 +97,13 @@ jobs:
         if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), format('ci-{0}', matrix.suite)) }}
         run: make ${{ matrix.suite }}
         shell: bash
+      # The way to the pinned binary, on every runner it serves. Seconds, and
+      # never skipped: what it checks (curl, tar, sha256sum, the RELEASE
+      # file) is no gate's input.
+      - name: fetch.sh
+        if: ${{ matrix.suite == 'sign-test' }}
+        run: make fetch-test
+        shell: bash
       - uses: ./sign
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
@@ -122,11 +129,37 @@ jobs:
   # every note this job writes by hand is pushed there. Fixture files live
   # under $RUNNER_TEMP, never in the checkout, so the producer's clean-tree
   # guard holds.
+  #
+  # Four legs, one per way the actions reach an answer, each held to the
+  # same assertions: `built`, this branch's binary through `binary:`;
+  # `release`, the binary RELEASE pins, downloaded and digest-checked;
+  # `broken` (exits non-zero) and `silent` (exits 0, writes nothing), where
+  # every step must warn and fall back to verify.sh / sign.sh.
   action:
+    strategy:
+      fail-fast: false
+      matrix:
+        binary: [built, release, broken, silent]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: bin
+        name: the binary for this leg
+        env:
+          LEG: ${{ matrix.binary }}
+        run: |
+          set -eu
+          # Under target/, which is ignored: the producer's clean-tree guard
+          # holds.
+          case "$LEG" in
+            built) cargo build --release -q; path=target/release/git-attest ;;
+            release) path= ;;
+            broken) mkdir -p target/stubs; printf '#!/bin/sh\nexit 3\n' > target/stubs/git-attest; path=target/stubs/git-attest ;;
+            silent) mkdir -p target/stubs; printf '#!/bin/sh\nexit 0\n' > target/stubs/git-attest; path=target/stubs/git-attest ;;
+          esac
+          [ -z "$path" ] || chmod +x "$path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
       - name: isolate from the real attestations
         run: |
           set -eu
@@ -142,6 +175,8 @@ jobs:
       #    means nothing covered, and the step must not fail the job.
       - id: bare
         uses: ./
+        with:
+          binary: ${{ steps.bin.outputs.path }}
       - name: nothing covered, and the step succeeded
         run: |
           set -eu
@@ -170,6 +205,7 @@ jobs:
       - id: signed
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
       - name: the attestation is reported, exactly
         run: |
@@ -192,6 +228,7 @@ jobs:
       - id: nokey
         uses: ./sign
         with:
+          binary: ${{ steps.bin.outputs.path }}
           key: ""
           gates: ci-lint-only
       - name: an empty key signs nothing and succeeds
@@ -210,6 +247,7 @@ jobs:
       - id: appended
         uses: ./sign
         with:
+          binary: ${{ steps.bin.outputs.path }}
           key: ${{ steps.readkey.outputs.key }}
           gates: ci-lint-only
           platform: aarch64-macos
@@ -226,23 +264,27 @@ jobs:
       - id: strict
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
           include-local: true
       - id: loose
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
           anywhere: ci-lint-only
           include-local: true
       - id: osonly
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
           platform: macos
           include-local: true
       - id: nolocal
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
           anywhere: ci-lint-only
       - name: strict, anywhere and os-only read the two blocks as specified
@@ -277,6 +319,7 @@ jobs:
       - id: fpsign
         uses: ./sign
         with:
+          binary: ${{ steps.bin.outputs.path }}
           key: ${{ steps.readkey2.outputs.key }}
           gates: ci-fmt
           push: false
@@ -289,6 +332,7 @@ jobs:
       - id: fpmoved
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
           include-local: true
       - name: an unrelated commit keeps the gate covered, by fingerprint
@@ -299,6 +343,7 @@ jobs:
       - id: fpinput
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
           include-local: true
       - name: a commit to a declared input does not
@@ -326,6 +371,7 @@ jobs:
       - id: collide
         uses: ./
         with:
+          binary: ${{ steps.bin.outputs.path }}
           signers: ${{ runner.temp }}/ci-signers
       - name: a merely-prefix-matching gate does NOT count as covered
         run: |
@@ -365,6 +411,7 @@ jobs:
       - id: spied
         uses: ./sign
         with:
+          binary: ${{ steps.bin.outputs.path }}
           key: ${{ steps.readkey3.outputs.key }}
           gates: ci-spy
           push: false

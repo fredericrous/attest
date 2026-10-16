@@ -1,9 +1,16 @@
 # Verify a signed attestation, so a CI job can skip work that already ran.
 #
-# Composite, and deliberately WITHOUT a download step. The contract here is
-# fail-open — every failure means "run the tests" — so a step that fetched a
-# binary would turn a flaky network into a silently disabled gate. Everything
-# below needs only `git` and `ssh-keygen`, which every runner already has.
+# Runs git-attest, attest's one implementation (decisions ADR-0037), at the
+# version RELEASE pins and only with the archive digest RELEASE names: the
+# commit you pin names the bytes it runs. fetch.sh takes the archive from the
+# runner's tool cache or the release, checks it, and proves it runs.
+#
+# Fail-open, as ever: every failure means "run the tests". So whatever goes
+# wrong on the way to an answer — no download, a digest mismatch, no asset
+# for this runner, a binary that will not execute, a run that exits non-zero
+# or writes no `covered=` line — prints one `::warning`, and verify.sh, which
+# needs only `git` and `ssh-keygen`, answers instead. A flaky network can
+# cost a skip, never disable a gate, never fail the job.
 #
 # Forgejo uses the same file: `uses: https://github.com/fredericrous/attest@v1`.
 # Forgejo Actions sets the same GITHUB_* variables this relies on.
@@ -55,6 +62,14 @@ inputs:
       later job. Only `true`, `false` or empty; anything else fails the step.
     required: false
     default: "false"
+  binary:
+    description: >-
+      TEST-ONLY: a git-attest binary to run instead of the pinned release,
+      relative to the workspace. attest's own CI sets it after `cargo build`
+      so a branch tests its own code; anywhere else it only takes away the
+      digest check. Setting it prints a notice.
+    required: false
+    default: ""
 
 outputs:
   gates:
@@ -99,6 +114,7 @@ runs:
         ATTEST_PLATFORM: ${{ inputs.platform }}
         ATTEST_ANYWHERE: ${{ inputs.anywhere }}
         ATTEST_INCLUDE_LOCAL: ${{ inputs.include-local }}
+        ATTEST_BINARY: ${{ inputs.binary }}
       run: |
         set -u
         # Positional parameters rather than a bash array: macOS runners can
@@ -116,10 +132,41 @@ runs:
           false | "") ;;
           *) echo "attest: include-local must be true or false, not '$ATTEST_INCLUDE_LOCAL'" >&2; exit 2 ;;
         esac
+        # The binary: the pinned release, or (tests only) the one given.
+        bin= why=
+        if [ -n "$ATTEST_BINARY" ]; then
+          echo "::notice title=attest::binary: is test-only; running $ATTEST_BINARY, not the pinned release"
+          bin=$ATTEST_BINARY
+        else
+          err=$(mktemp)
+          bin=$(bash "$GITHUB_ACTION_PATH/fetch.sh" 2> "$err") || bin=
+          cat "$err" >&2
+          if [ -z "$bin" ]; then
+            why=$(tail -n 1 "$err" | sed 's/^attest: //')
+            [ -n "$why" ] || why="fetch.sh named no binary"
+          fi
+          rm -f "$err"
+        fi
         # Reasons go to stderr and land in the job log. When an expected skip
         # does not happen, that log says which of tree, platform, signature or
         # signers was the reason — the alternative is a silent non-answer.
-        out=$(bash "$GITHUB_ACTION_PATH/verify.sh" --github-output "$@")
+        # GitHub runs this under `-e`: every status below is tested, not left
+        # to end the step.
+        out=
+        if [ -n "$bin" ]; then
+          if out=$("$bin" covered --github-output "$@"); then
+            case $'\n'"$out" in
+              *$'\n'covered=*) ;;
+              *) why="git-attest wrote no covered= line" ;;
+            esac
+          else
+            why="git-attest exited $?"
+          fi
+        fi
+        if [ -n "$why" ]; then
+          echo "::warning title=attest::$why; verify.sh answers instead"
+          out=$(ATTEST_NO_DEPRECATION=1 bash "$GITHUB_ACTION_PATH/verify.sh" --github-output "$@")
+        fi
         printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
         # A mirror nobody could fetch covers nothing, silently in the gates —
         # so say it where a fleet-wide slowdown would otherwise hide it.

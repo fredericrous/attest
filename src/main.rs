@@ -1,9 +1,9 @@
 //! `git-attest` — read the attestation covering the tree checked out here.
 //!
-//! The actions in this repository run `verify.sh`, which needs nothing but
-//! `git` and `ssh-keygen`. This binary is the same contract for everywhere
-//! else: CI that is neither GitHub nor Forgejo, and a laptop asking why a skip
-//! did not happen.
+//! The actions in this repository run this binary, at the version and digest
+//! `RELEASE` pins, and fall back to `verify.sh` / `sign.sh` when it cannot
+//! answer. It is the same contract everywhere else: CI that is neither
+//! GitHub nor Forgejo, and a laptop asking why a skip did not happen.
 
 mod cli_sign;
 

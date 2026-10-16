@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- **The actions run the binary** (decisions ADR-0037). `action.yml` runs
+  `git-attest covered` and `sign/action.yml` runs `git-attest sign`, at the
+  version the new `RELEASE` file names and only from an archive whose sha256
+  it names: the commit a workflow pins names the bytes it runs. `fetch.sh`
+  takes the archive from the runner's tool cache or the release, re-checks it
+  on every use, extracts a private copy and proves it runs. Linux x86_64 takes
+  the static musl build.
+- **Still fail-open.** A failed download, a digest mismatch, no asset for the
+  runner, a binary that will not run, or a run that fails or writes no
+  `covered=` / `status=` line prints one `::warning` and falls back to
+  `verify.sh` / `sign.sh`. Outputs are unchanged on every path.
+- **`binary:`**, a test-only input on both actions: run a built binary
+  instead of the pinned one, with a notice. attest's CI runs the action suite
+  four ways: this branch's binary, the pinned release, and two broken
+  binaries that must fall back.
+- **`verify.sh` and `sign.sh` are deprecated as entry points**, and go away
+  in 2.0.0: one line on stderr (a `::warning` under GitHub Actions), even
+  under `--quiet`; stdout is unchanged. `ATTEST_NO_DEPRECATION=1` silences
+  it, and the actions set it when they fall back.
+- **The release is built before it is tagged.** `prepare-release` builds the
+  archives into a draft and hands back `RELEASE` for the release PR; the tag
+  publishes that draft only if its archives match the tagged digests, and
+  rebuilds nothing. `v1` no longer moves on the tag: `move-major` moves it
+  once the canary has passed. README, "Releasing".
+- SPEC.md's `amont-provenance-v1` section is now a pointer: the format is
+  specified in amont, which produces it.
+
 ## 1.6.0
 
 - **One implementation, as a library** (decisions ADR-0037). `git-attest` is

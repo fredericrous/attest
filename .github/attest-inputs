@@ -15,7 +15,7 @@
 # tool config files.
 ci-fmt              .github/workflows/ci.yaml Cargo.toml rust-toolchain.toml src tests ?examples ?benches ?build.rs ?.cargo ?rustfmt.toml ?.rustfmt.toml
 ci-clippy           .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src tests ?examples ?benches ?build.rs ?.cargo ?clippy.toml ?.clippy.toml
-ci-shellcheck       .github/workflows/ci.yaml verify.sh sign/sign.sh tests scripts ?.shellcheckrc
+ci-shellcheck       .github/workflows/ci.yaml verify.sh sign/sign.sh fetch.sh tests scripts ?.shellcheckrc
 pre-push-cargo-test .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src tests ?examples ?benches ?build.rs ?.cargo
 ci-conformance      .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src Makefile verify.sh sign/sign.sh tests scripts ?build.rs ?.cargo
 ci-sign-test        .github/workflows/ci.yaml Cargo.toml Cargo.lock rust-toolchain.toml src Makefile verify.sh sign/sign.sh tests scripts ?build.rs ?.cargo

@@ -75,6 +75,18 @@ while [ $# -gt 0 ]; do
         *) printf 'sign.sh: unknown argument %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+
+# Deprecated since 1.7.0 (decisions ADR-0037): one line on stderr, even under
+# --quiet, and stdout is untouched. The actions set ATTEST_NO_DEPRECATION when
+# they fall back here, having already warned why.
+if [ -z "${ATTEST_NO_DEPRECATION:-}" ]; then
+    msg='sign.sh is deprecated and goes away in 2.0.0; run git-attest sign, which takes the same flags and prints the same lines'
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        printf '::warning title=attest::%s\n' "$msg" >&2
+    else
+        printf 'attest: %s\n' "$msg" >&2
+    fi
+fi
 [ -n "$have_gates" ] || { printf 'sign.sh: --gates is required\n' >&2; exit 2; }
 case $attempts in '' | *[!0-9]*) printf 'sign.sh: --attempts wants a number\n' >&2; exit 2 ;; esac
 if [ -t 0 ]; then
