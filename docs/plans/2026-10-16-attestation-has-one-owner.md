@@ -1,7 +1,7 @@
 ---
 canonical: decisions:docs/plans/2026-10-16-attestation-has-one-owner.md
 phases: [2, 3]
-status: active
+status: done
 ---
 # Attestation has one owner (pointer)
 
