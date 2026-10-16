@@ -8,6 +8,18 @@
   not an attestation, and no verifier here reads it; the section is the
   contract between amont-agent, which writes the payload, and amont, which
   signs it.
+- **SPEC: one owner per line of `amont-provenance-v1`.** The payload
+  amont-agent hands over carries no `canon` line; the signer computes canon(T)
+  of the pushed tree and inserts it after `tree`, whatever `planExempt` says,
+  and refuses a payload that already has one. The `review` line carries the
+  **content id**, a new subsection that defines the value an implementation
+  review binds to (ADR-0034) with known answers, and says why it differs from
+  canon(T): it ignores whether a plan exists.
+- **Shared canonical-tree vectors.** `tests/vectors/canon.txt` holds raw
+  listings and the canonical text each gives, in a strict line format. The
+  Rust tests read it, and `tests/conformance.sh` runs it through the canon
+  block of both `verify.sh` and `sign/sign.sh`; amont vendors the file.
+- `.github/allowed_signers` lists the `amont-provenance` namespace.
 
 ## 1.5.0
 

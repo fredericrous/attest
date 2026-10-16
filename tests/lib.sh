@@ -290,6 +290,66 @@ attach_canon() { # dir payload keyfile canon
         -m "$(sign_block "$dir" "$payload" "$keyfile")" "$k" 2> /dev/null
 }
 
+# Every case of tests/vectors/canon.txt, through the canon block of `script`
+# (verify.sh or sign/sign.sh) itself: the block is cut out of the script and
+# run with a `git` that answers `ls-tree` with the case's listing and whose
+# `hash-object` prints its input, so `canon_of` prints the canonical text. The
+# file's format is strict (its header says it); a line it does not allow is a
+# failure, so a damaged file cannot test less in silence.
+canon_vectors() { # script
+    local script=$1 label block line at=0 name='' state=out cases=0 rc
+    label="vectors: $(basename "$script")"
+    block=$(sed -n '/^# canon-block:start$/,/^# canon-block:end$/p' "$script")
+    [ -n "$block" ] || { fail "$label: a canon block" "none in $script"; return; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        at=$((at + 1))
+        case $state:$line in
+            out:'' | out:'#'*) ;;
+            out:'case '*)
+                name=${line#case }; state=in
+                : > "$WORK/vec.list"; : > "$WORK/vec.want" ;;
+            in:'in '*) printf '%s\n' "${line#in }" >> "$WORK/vec.list" ;;
+            in:'out '* | want:'out '*) printf '%s\n' "${line#out }" >> "$WORK/vec.want"; state=want ;;
+            in:none) state=none ;;
+            want:end | none:end)
+                cases=$((cases + 1))
+                rm -rf "$WORK/vec.tmp"; mkdir "$WORK/vec.tmp"
+                # tmp and root are read by the block's functions, and git is
+                # called by them: shellcheck sees neither through the eval.
+                # shellcheck disable=SC2034,SC2317
+                (
+                    tmp=$WORK/vec.tmp; root=''
+                    git() {
+                        case " $* " in
+                            *" ls-tree "*) cat "$WORK/vec.list" ;;
+                            *" hash-object "*) cat ;;
+                            *) return 1 ;;
+                        esac
+                    }
+                    eval "$block"
+                    canon_of TREE > "$WORK/vec.got"
+                )
+                rc=$?
+                if [ "$state" = none ]; then
+                    if [ "$rc" -ne 0 ]; then ok "$label: $name"; else fail "$label: $name" "gave a canon, expected none"; fi
+                elif [ "$rc" -eq 0 ] && cmp -s "$WORK/vec.got" "$WORK/vec.want"; then
+                    ok "$label: $name"
+                else
+                    fail "$label: $name" "$(diff "$WORK/vec.want" "$WORK/vec.got" | head -5)"
+                fi
+                state=out ;;
+            *)
+                fail "$label: canon.txt:$at is not allowed here" "$line"
+                return ;;
+        esac
+    done < "$LIB_DIR/vectors/canon.txt"
+    if [ "$state" != out ]; then
+        fail "$label: canon.txt ends inside a case" "$name"
+    elif [ "$cases" -eq 0 ]; then
+        fail "$label: canon.txt has cases" "none read"
+    fi
+}
+
 # Like `check`, with a git that fails on purpose (tests/fault/git) first on
 # PATH. Both implementations spawn `git` from PATH — except the Rust binary
 # on Windows, whose process launcher will not run an extension-less script;

@@ -635,6 +635,13 @@ check "...nor when admitted by --anywhere" 'pre-push-*' "$R" --platform s390x-ai
 # their existence. Every fixture attests the base, then moves the tree, so the
 # tree route answers nothing; the block is filed under Kc only.
 
+# The known answers every implementation shares, through the canon block of
+# both shell scripts, whichever implementation this run is for: the producer
+# and the verifier must fingerprint alike, and alike with git-attest and amont,
+# whose own tests read the same file.
+canon_vectors "$LIB_DIR/../verify.sh"
+canon_vectors "$LIB_DIR/../sign/sign.sh"
+
 canon_repo() { # [amont.conf content]
     make_repo "$R" signer@example.org "$WORK/key"
     mkdir -p "$R/src" "$R/docs/plans" "$R/x/docs/plans"
