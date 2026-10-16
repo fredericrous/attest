@@ -1,0 +1,105 @@
+# Known answers for SPEC.md, "Input fingerprints" (the spec grammar) and
+# "Canonical tree" (the directive): spec text and what it declares, or the
+# first rule it breaks. Errors are named by kind and line, never by message,
+# so wording may change without changing a case.
+#
+# The format is strict, and a reader refuses anything else:
+#
+#   case <name>              opens a case; outside one only comments (#) and
+#                            blank lines may appear
+#   in <line>                one spec line, verbatim after "in " (TAB
+#                            included); the spec is these lines, each
+#                            followed by LF
+#   gate <name> <path>...    a declared gate, in order, `?` marking an
+#                            optional path; then
+#   exempt                   when the spec holds `@plan-exempt off`
+#   error <kind> [<line>]    or instead: the spec is invalid. Kinds: byte
+#                            (no line), gate-name, duplicate, no-paths,
+#                            path, directive
+#   end                      closes the case
+
+case gates, optional paths, comments and blanks
+in # what each gate reads
+in lint src docs/README.md
+in
+in 	 test   src ?build.rs Cargo.toml
+gate lint src docs/README.md
+gate test src ?build.rs Cargo.toml
+end
+
+case an empty spec declares nothing
+end
+
+case the directive alone
+in @plan-exempt off
+exempt
+end
+
+case the directive with blanks, beside a gate
+in   @plan-exempt 	 off  
+in lint src
+gate lint src
+exempt
+end
+
+case another directive is invalid
+in lint src
+in @plan-exempt on
+error directive 2
+end
+
+case a misspelled directive is invalid
+in @planExempt off
+error directive 1
+end
+
+case a gate name outside the alphabet
+in Lint! src
+error gate-name 1
+end
+
+case a gate declared twice
+in lint src
+in lint docs
+error duplicate 2
+end
+
+case a gate with no paths
+in lint
+error no-paths 1
+end
+
+case an absolute path
+in lint /src
+error path 1
+end
+
+case a glob
+in lint src/*.rs
+error path 1
+end
+
+case a path of `?` alone
+in lint ?
+error path 1
+end
+
+case a `..` component
+in lint src/../x
+error path 1
+end
+
+case a trailing slash
+in lint src/
+error path 1
+end
+
+case pathspec magic
+in lint :(glob)src
+error path 1
+end
+
+case a carriage return at the end of a line
+in lint src
+error byte
+end

@@ -637,3 +637,187 @@ fn the_opt_out_directive_is_a_line_of_the_spec_and_nothing_else_is() {
     assert!(is_plan_exempt_directive(b" @plan-exempt\toff "));
     assert!(!is_plan_exempt_directive(b"@plan-exempt off\r"));
 }
+
+/// One case of a vectors file: its name and its directives, in order.
+type Case = (String, Vec<(String, String)>);
+
+/// Parse a `tests/vectors/*.txt` file whose cases hold only the `allowed`
+/// directives (its header says which). Strict: a stray line, an unknown
+/// directive or an unclosed case panics, so a damaged file fails instead of
+/// silently testing less.
+fn vectors(name: &str, text: &str, allowed: &[&str]) -> Vec<Case> {
+    let mut cases = Vec::new();
+    let mut open: Option<Case> = None;
+    for (n, line) in text.split('\n').enumerate() {
+        let at = n + 1;
+        match open.as_mut() {
+            None if line.is_empty() || line.starts_with('#') => {}
+            None => {
+                let case = line
+                    .strip_prefix("case ")
+                    .unwrap_or_else(|| panic!("{name}:{at}: expected `case`: {line:?}"));
+                open = Some((case.to_string(), Vec::new()));
+            }
+            Some(_) if line == "end" => cases.push(open.take().unwrap()),
+            Some((_, lines)) => {
+                let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+                assert!(
+                    allowed.contains(&word),
+                    "{name}:{at}: not a directive: {line:?}"
+                );
+                lines.push((word.to_string(), rest.to_string()));
+            }
+        }
+    }
+    assert!(open.is_none(), "{name}: the last case has no `end`");
+    assert!(!cases.is_empty(), "{name}: no cases");
+    cases
+}
+
+/// The values of every `word` directive of a case.
+fn all<'a>(lines: &'a [(String, String)], word: &str) -> Vec<&'a str> {
+    lines
+        .iter()
+        .filter(|(w, _)| w == word)
+        .map(|(_, v)| v.as_str())
+        .collect()
+}
+
+#[test]
+fn payload_gives_every_known_answer() {
+    let text = include_str!("../tests/vectors/payload.txt");
+    let words = [
+        "tree", "gates", "platform", "input", "canon", "producer", "payload",
+    ];
+    for (name, lines) in vectors("payload.txt", text, &words) {
+        let one = |w: &str| {
+            let v = all(&lines, w);
+            assert_eq!(v.len(), 1, "{name}: one `{w}`");
+            v[0]
+        };
+        let inputs: Vec<(String, String)> = all(&lines, "input")
+            .iter()
+            .map(|i| {
+                let (g, fp) = i.split_once(' ').expect("input <gate> <fp>");
+                (g.to_string(), fp.to_string())
+            })
+            .collect();
+        let canon = all(&lines, "canon");
+        let want: String = all(&lines, "payload")
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            payload(
+                one("tree"),
+                one("gates"),
+                one("platform"),
+                &inputs,
+                canon.first().copied(),
+                one("producer")
+            ),
+            want,
+            "{name}"
+        );
+    }
+}
+
+/// A scratch repository of `format`, for hashing.
+fn hash_repo(format: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("git-attest-hash-{format}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    assert!(std::process::Command::new("git")
+        .current_dir(&d)
+        .args([
+            "init",
+            "-q",
+            "--template=",
+            &format!("--object-format={format}")
+        ])
+        .status()
+        .unwrap()
+        .success());
+    d
+}
+
+#[test]
+fn fingerprint_gives_every_known_answer() {
+    let text = include_str!("../tests/vectors/fingerprint.txt");
+    let repos = [("sha1", hash_repo("sha1")), ("sha256", hash_repo("sha256"))];
+    let repo = |f: &str| {
+        &repos
+            .iter()
+            .find(|(n, _)| *n == f)
+            .expect("sha1 or sha256")
+            .1
+    };
+    for (name, lines) in vectors(
+        "fingerprint.txt",
+        text,
+        &["implicit", "key", "canon-key", "out"],
+    ) {
+        let out: Vec<String> = all(&lines, "out").iter().map(|s| s.to_string()).collect();
+        let (word, args) = &lines[0];
+        let a: Vec<&str> = args.split(' ').collect();
+        let got = match word.as_str() {
+            "implicit" => implicit_inputs(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+            "key" => vec![key(repo(a[0]), a[1], a[2]).unwrap()],
+            "canon-key" => vec![canon_key(repo(a[0]), a[1]).unwrap()],
+            other => panic!("{name}: a case opens with implicit, key or canon-key, not {other}"),
+        };
+        assert_eq!(got, out, "{name}");
+    }
+    for (_, d) in &repos {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn spec_gives_every_known_answer() {
+    use crate::spec::Error as E;
+    let text = include_str!("../tests/vectors/spec.txt");
+    for (name, lines) in vectors("spec.txt", text, &["in", "gate", "exempt", "error"]) {
+        let bytes: String = all(&lines, "in").iter().map(|l| format!("{l}\n")).collect();
+        let got = parse_spec(bytes.as_bytes());
+        match all(&lines, "error").first() {
+            Some(want) => {
+                let e = got.expect_err(&name);
+                let (kind, line) = match &e {
+                    E::Byte(_) => ("byte", None),
+                    E::GateName { line, .. } => ("gate-name", Some(*line)),
+                    E::Duplicate { line, .. } => ("duplicate", Some(*line)),
+                    E::NoPaths { line, .. } => ("no-paths", Some(*line)),
+                    E::Path { line, .. } => ("path", Some(*line)),
+                    E::Directive { line, .. } => ("directive", Some(*line)),
+                    other => panic!("{name}: no vector kind for {other:?}"),
+                };
+                let got = match line {
+                    Some(l) => format!("{kind} {l}"),
+                    None => kind.to_string(),
+                };
+                assert_eq!(got, *want, "{name}: {e}");
+            }
+            None => {
+                let spec = got.unwrap_or_else(|e| panic!("{name}: {e}"));
+                let gates: Vec<String> = spec
+                    .gates
+                    .iter()
+                    .map(|(g, p)| {
+                        let paths: Vec<String> = p
+                            .iter()
+                            .map(|t| format!("{}{}", if t.optional { "?" } else { "" }, t.path))
+                            .collect();
+                        format!("{g} {}", paths.join(" "))
+                    })
+                    .collect();
+                assert_eq!(gates, all(&lines, "gate"), "{name}");
+                assert_eq!(
+                    spec.plan_exempt_off,
+                    !all(&lines, "exempt").is_empty(),
+                    "{name}"
+                );
+            }
+        }
+    }
+}

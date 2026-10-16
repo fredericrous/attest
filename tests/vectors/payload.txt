@@ -1,0 +1,68 @@
+# Known answers for SPEC.md, "The note": the fields of an attestation and the
+# exact payload bytes a released producer signed for them. Each case was
+# captured once from a real run (named in the case) and is never edited:
+# a change here is a change to what every producer signs.
+#
+# The format is strict, and a reader refuses anything else:
+#
+#   case <name>       opens a case; outside one only comments (#) and blank
+#                     lines may appear
+#   tree <oid>        the fields, in this order: tree, gates, platform,
+#   gates <names>     input (zero or more, `input <gate> <fp>`), canon (zero
+#   platform <p>      or one), producer
+#   input <g> <fp>
+#   canon <oid>
+#   producer <p>
+#   payload <line>    one line of the expected payload, verbatim after
+#                     "payload "; the payload is these lines, each followed
+#                     by LF
+#   end               closes the case
+
+case sign/sign.sh 1.5.1 --no-push, two inputs, an optional path absent, a canonical tree
+tree 3e3acf5c87079fab70841a583d2664688e81602d
+gates lint test
+platform x86_64-linux
+input lint 50d60ae3243bfe07c7ea2d7b0ead70dd870be664
+input test 08365f7080cda1332230bf50ae474bb4a679e638
+canon dc207c4ad040d8d963d5bb2f4e3d86e5a028f493
+producer attest-sign
+payload amont-attest-v2
+payload tree 3e3acf5c87079fab70841a583d2664688e81602d
+payload gates lint test
+payload platform x86_64-linux
+payload input lint 50d60ae3243bfe07c7ea2d7b0ead70dd870be664
+payload input test 08365f7080cda1332230bf50ae474bb4a679e638
+payload canon dc207c4ad040d8d963d5bb2f4e3d86e5a028f493
+payload amont attest-sign
+end
+
+case amont 1.57.0 pre-push, no input, a canonical tree
+tree d9715b32fa9eeb05d4d788ac3c8a16311cee95aa
+gates pre-push-branch-protect pre-push-branch-pattern pre-push-secrets pre-push-pull-rebase
+platform x86_64-linux
+canon d90122597869985cb57f42ca083efaad466d595c
+producer 1.57.0
+payload amont-attest-v2
+payload tree d9715b32fa9eeb05d4d788ac3c8a16311cee95aa
+payload gates pre-push-branch-protect pre-push-branch-pattern pre-push-secrets pre-push-pull-rebase
+payload platform x86_64-linux
+payload canon d90122597869985cb57f42ca083efaad466d595c
+payload amont 1.57.0
+end
+
+case amont 1.57.0 pre-push, one input, a canonical tree
+tree 8a8f0ab175ad902623376fc080b2abb1fb0ecbc4
+gates pre-push-branch-protect pre-push-branch-pattern pre-push-secrets pre-push-pull-rebase
+platform x86_64-linux
+input pre-push-secrets 155a17886140ed276435d57893d9bed8ba75f78b
+canon 2f9ba5afe527cfe112028e41a1c80c2a410467a8
+producer 1.57.0
+payload amont-attest-v2
+payload tree 8a8f0ab175ad902623376fc080b2abb1fb0ecbc4
+payload gates pre-push-branch-protect pre-push-branch-pattern pre-push-secrets pre-push-pull-rebase
+payload platform x86_64-linux
+payload input pre-push-secrets 155a17886140ed276435d57893d9bed8ba75f78b
+payload canon 2f9ba5afe527cfe112028e41a1c80c2a410467a8
+payload amont 1.57.0
+end
+

@@ -739,4 +739,16 @@ assert_eq "canon: the tree ref deleted alone: the canonical skip stands" "$(cove
 git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest-inputs
 assert_eq "canon: the inputs ref deleted too: nothing" "$(covered_in_clone)" ""
 
+# The two signers make the same block: the same payload, and with the same
+# ed25519 key the same signature, so whichever signs second finds it there.
+# ATTEST_GIT_ATTEST names the binary (Makefile sets it).
+if [ -n "${ATTEST_GIT_ATTEST:-}" ] && [ -x "$ATTEST_GIT_ATTEST" ]; then
+    spec_repo 'ci-test src Cargo.toml ?build.rs'
+    (cd "$R" && bash "$SIGN" --gates "ci-test ci-fmt" --platform x86_64-linux --no-push < "$WORK/key" > /dev/null 2>&1)
+    OUT=$(cd "$R" && "$ATTEST_GIT_ATTEST" sign --gates "ci-test ci-fmt" --platform x86_64-linux --no-push --github-output < "$WORK/key" 2> "$WORK/err"); RC=$?
+    ERR=$(cat "$WORK/err")
+    expect "git-attest sign after sign.sh: the identical block is already there" 0 \
+        "status=already-present|signed=false|pushed=false|gates=ci-test ci-fmt|inputs=1/1"
+fi
+
 summary

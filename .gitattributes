@@ -1,5 +1,5 @@
-# The canonical-tree known answers are compared byte for byte, TABs and LFs
+# The known answers are compared byte for byte, TABs and LFs
 # included, and amont vendors an identical copy: a checkout that converted
 # line endings (Git for Windows defaults core.autocrlf to true) would hand
 # every reader CRLF records the strict format refuses.
-tests/vectors/canon.txt -text
+tests/vectors/*.txt -text
