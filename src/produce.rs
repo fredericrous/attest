@@ -44,9 +44,13 @@ pub fn attestation(
     let signed: Vec<&str> = gates.split_whitespace().collect();
     let mut inputs = Vec::new();
     let mut absent: Vec<String> = Vec::new();
+    // A spec that is there and unusable degrades the block to its object key
+    // (SPEC.md, "Producing"): no input lines, and no canonical tree either.
+    let mut unusable = true;
     match crate::spec::at(root, tree) {
-        Ok(None) => {}
+        Ok(None) => unusable = false,
         Ok(Some((_, spec))) => {
+            unusable = false;
             for (gate, _) in &spec.gates {
                 if !signed.contains(&gate.as_str()) {
                     continue;
@@ -72,6 +76,9 @@ pub fn attestation(
         Err(AtError::Invalid(path, why)) => {
             log.push(format!("{path} {why}; no input fingerprints"))
         }
+        Err(AtError::Unlisted) => {
+            log.push("cannot list the signed tree; no input fingerprints".into())
+        }
     }
     if !absent.is_empty() {
         absent.sort();
@@ -82,6 +89,10 @@ pub fn attestation(
         ));
     }
     let canon_oid = match plan_exempt(root, tree) {
+        _ if unusable => {
+            log.push("the spec is unusable; no canonical tree".into());
+            None
+        }
         PlanExempt::Off | PlanExempt::OffByAmontConf => {
             log.push("planExempt is off here; no canonical tree".into());
             None

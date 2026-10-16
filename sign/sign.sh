@@ -290,7 +290,7 @@ canon_key() { printf 'amont-attest-canon %s\n' "$1" | git -C "${root:-.}" hash-o
 # there too. Read from the SIGNED tree, never the working copy (--allow-dirty
 # exists), into a file, validated on the raw bytes, then parsed.
 # ---------------------------------------------------------------------------
-spec_ok=
+spec_ok=; spec_bad=
 load_spec() {
     local present='' p n bad
     for p in .forgejo/attest-inputs .github/attest-inputs; do
@@ -301,22 +301,22 @@ load_spec() {
     [ $# -gt 0 ] || return 0
     if [ $# -gt 1 ]; then
         say "both .forgejo/attest-inputs and .github/attest-inputs exist; no input fingerprints"
-        return 0
+        spec_bad=1; return 0
     fi
     p=$1
     if ! git cat-file blob "$object_tree:$p" > "$tmp/spec" 2> /dev/null; then
         say "cannot read $p from the signed tree; no input fingerprints"
-        return 0
+        spec_bad=1; return 0
     fi
     n=$(wc -c < "$tmp/spec" | tr -d ' ')
     if [ "$n" -gt 65536 ]; then
         say "$p is larger than 65536 bytes; no input fingerprints"
-        return 0
+        spec_bad=1; return 0
     fi
     bad=$(LC_ALL=C tr -d ' \t\n!-~' < "$tmp/spec" | wc -c | tr -d ' ')
     if [ "$bad" -ne 0 ]; then
         say "$p contains a byte that is not printable ASCII, space, tab or LF; no input fingerprints"
-        return 0
+        spec_bad=1; return 0
     fi
     if ! awk '
         function bad(why) { printf "line %d: %s\n", NR, why > "/dev/stderr"; exit 1 }
@@ -354,7 +354,7 @@ load_spec() {
             if (++gates > 64) bad("declares more than 64 gates")
         }' "$tmp/spec" > "$tmp/spec.gates" 2> "$tmp/spec.err"; then
         say "$p $(sed -n 1p "$tmp/spec.err"); no input fingerprints"
-        return 0
+        spec_bad=1; return 0
     fi
     spec_ok=1
 }
@@ -424,14 +424,20 @@ fi
 # repository opted out (`set planExempt off`) or git failed at any step. A
 # producer that cannot compute it says why and attaches no `canon` line; the
 # block is otherwise as before.
+# A spec that is there and unusable degrades the block to its object key
+# (SPEC.md, "Producing"): no input lines, and no canonical tree either.
 canon_oid=
-plan_exempt_off "$object_tree"
-case $? in
-    0 | 3) say "planExempt is off here; no canonical tree" ;;
-    1) canon_oid=$(canon_of "$object_tree") || canon_oid=
-       [ -n "$canon_oid" ] || say "cannot compute the canonical tree; none attached" ;;
-    *) say "cannot read amont.conf or attest-inputs; no canonical tree" ;;
-esac
+if [ -n "$spec_bad" ]; then
+    say "the spec is unusable; no canonical tree"
+else
+    plan_exempt_off "$object_tree"
+    case $? in
+        0 | 3) say "planExempt is off here; no canonical tree" ;;
+        1) canon_oid=$(canon_of "$object_tree") || canon_oid=
+           [ -n "$canon_oid" ] || say "cannot compute the canonical tree; none attached" ;;
+        *) say "cannot read amont.conf or attest-inputs; no canonical tree" ;;
+    esac
+fi
 
 # The payload, in the exact shape SPEC.md gives — the `input` lines after
 # `platform`, then `canon`, before `amont`, in spec order, so a re-run is

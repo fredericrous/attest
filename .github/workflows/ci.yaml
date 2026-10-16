@@ -74,9 +74,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # The verifiers' fixtures and the producers' are separate legs: since
+        # 1.6.0 sign-test runs both signers against both verifiers, and on
+        # Windows, which spawns processes slowly, one leg running both suites
+        # passed 40 minutes. Split, each finishes in about half that, in
+        # parallel.
+        suite: [conformance, sign-test]
     runs-on: ${{ matrix.os }}
-    # Windows spawns processes slowly and the suites run three verifiers over
-    # 120 fixtures plus the producer's 71; it needs about 25 minutes there.
     timeout-minutes: 40
     permissions:
       contents: write
@@ -90,15 +94,15 @@ jobs:
         run: cargo test
         shell: bash
       - id: conformance
-        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'ci-conformance') }}
-        run: make conformance sign-test
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), format('ci-{0}', matrix.suite)) }}
+        run: make ${{ matrix.suite }}
         shell: bash
       - uses: ./sign
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
           gates: >-
             ${{ steps.test.outcome        == 'success' && 'pre-push-cargo-test' || '' }}
-            ${{ steps.conformance.outcome == 'success' && 'ci-conformance'      || '' }}
+            ${{ steps.conformance.outcome == 'success' && format('ci-{0}', matrix.suite) || '' }}
 
   # A 1.1.0 verifier must read block 1 of a multi-block note and nothing
   # else. This is the proof behind SPEC.md's compatibility claim.

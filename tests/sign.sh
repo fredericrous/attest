@@ -460,6 +460,17 @@ case $ERR in *"planExempt is off"*) ok "canon: ...and says why" ;; *) fail "cano
 plan_edit
 assert_eq "canon: opted out, a plan edited: a fresh clone covers nothing" "$(covered_in_clone)" ""
 
+# A spec that is there and unusable degrades the block to its object key
+# (SPEC.md, "Producing"): no input lines, no canon line, nothing under Kc.
+canon_remote_repo
+mkdir -p "$R/.github"; printf 'ci-fmt src/*.rs\n' > "$R/.github/attest-inputs"
+git -C "$R" add -A; git -C "$R" commit -qm bad-spec; git -C "$R" push -q origin HEAD:refs/heads/main
+sign "$WORK/key" --gates "ci-fmt"
+expect "canon: an invalid spec still signs and pushes" 0 "status=pushed|signed=true|pushed=true|gates=ci-fmt|inputs=0/0"
+case $(signed_payload) in *"canon "* | *"input "*) fail "canon: an invalid spec writes no canon or input line" "$(signed_payload)" ;; *) ok "canon: an invalid spec writes no canon or input line" ;; esac
+assert_eq "canon: ...and no block under Kc" "$(remote_canon_blocks "$(canon_fp "$R")")" 0
+case $ERR in *"no canonical tree"*) ok "canon: ...and says why" ;; *) fail "canon: ...and says why" "$ERR" ;; esac
+
 # Local-only signing keeps the canonical block local, and --include-local reads it.
 canon_remote_repo
 sign "$WORK/key" --gates "ci-fmt" --no-push

@@ -454,6 +454,13 @@ fn load_spec(root: &Path, head_tree: &str, trail: &mut Vec<String>) -> Option<Sp
             push_reason(trail, format!("{path} {why}; input fingerprints disabled"));
             None
         }
+        Err(AtError::Unlisted) => {
+            push_reason(
+                trail,
+                "cannot list HEAD's tree; input fingerprints disabled".into(),
+            );
+            None
+        }
     }
 }
 

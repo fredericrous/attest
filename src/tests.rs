@@ -821,3 +821,21 @@ fn spec_gives_every_known_answer() {
         }
     }
 }
+
+/// "No spec" and "git could not say" are different answers: only the first
+/// opens the canonical route.
+#[test]
+fn a_tree_git_cannot_list_has_no_known_spec() {
+    let repo = scratch_repo("unlisted");
+    let bogus = "0123456789012345678901234567890123456789";
+    assert_eq!(
+        crate::spec::at(&repo, bogus).err(),
+        Some(crate::spec::AtError::Unlisted)
+    );
+    assert!(plan_exempt(&repo, bogus).is_off(), "fails narrow");
+    let mut log = Vec::new();
+    let att = crate::produce::attestation(&repo, bogus, "lint", "p", "t", &mut log);
+    assert_eq!(att.canon, None, "{log:?}");
+    assert!(att.inputs.is_empty());
+    let _ = std::fs::remove_dir_all(&repo);
+}
