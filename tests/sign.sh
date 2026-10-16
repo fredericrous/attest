@@ -4,6 +4,8 @@
 #   tests/sign.sh                # uses ./verify.sh to read back what was signed
 #   ATTEST_IMPL="target/release/git-attest covered" tests/sign.sh
 #                                # ...or any other verifier
+#   ATTEST_SIGN="target/release/git-attest sign" tests/sign.sh
+#                                # ...and any other signer: the same contract
 #
 # Every case asserts three things where they apply: the exit code (0 always,
 # 2 for a usage error), the four --github-output lines, and what verify.sh
@@ -13,6 +15,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SIGN="$HERE/sign/sign.sh"
+# The signer under test, a command line split on blanks.
+SIGNER=${ATTEST_SIGN:-"bash $SIGN"}
 VERIFY="$HERE/verify.sh"
 # shellcheck disable=SC2034  # read by lib.sh
 IMPL=${ATTEST_IMPL:-"bash $VERIFY --quiet"}
@@ -44,7 +48,8 @@ make_remote_repo() {
 # and the exit code.
 sign() { # keyfile [flags...]
     local keyfile=$1; shift
-    OUT=$(cd "$R" && bash "$SIGN" --github-output "$@" < "$keyfile" 2> "$WORK/err"); RC=$?
+    # shellcheck disable=SC2086  # the signer is a command line, split on purpose
+    OUT=$(cd "$R" && $SIGNER --github-output "$@" < "$keyfile" 2> "$WORK/err"); RC=$?
     ERR=$(cat "$WORK/err")
 }
 
@@ -278,8 +283,12 @@ expect "--platform is written as given" 0 "status=pushed|signed=true|pushed=true
 assert_eq "a foreign platform is not covered here" "$(covered_in_clone)" ""
 assert_eq "...but is on its own platform" "$(covered_in_clone --platform s390x-aix)" ci-fmt
 
-# The platform line uses the same table as the verifier (1.4.0).
-if (PATH="$HERE/tests/fake:$PATH" ATTEST_FAKE_UNAME="x x x" uname --probe 2> /dev/null) | grep -qx attest-fake-uname; then
+# The platform line uses the same table as the verifier (1.4.0). Only the
+# shell signer reads uname; git-attest takes its platform from the target it
+# was built for, the names this table reproduces.
+if [ "$SIGNER" != "bash $SIGN" ]; then
+    printf '  SKIP  a FreeBSD runner signs as x86_64-freebsd (only sign.sh reads uname)\n'
+elif (PATH="$HERE/tests/fake:$PATH" ATTEST_FAKE_UNAME="x x x" uname --probe 2> /dev/null) | grep -qx attest-fake-uname; then
     make_remote_repo
     (cd "$R" && PATH="$HERE/tests/fake:$PATH" ATTEST_FAKE_UNAME="FreeBSD amd64 FreeBSD" \
         bash "$SIGN" --gates ci-fmt --no-push < "$WORK/key" > /dev/null 2>&1)
@@ -729,5 +738,17 @@ git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest
 assert_eq "canon: the tree ref deleted alone: the canonical skip stands" "$(covered_in_clone)" "ci-fmt"
 git --git-dir="$ORIGIN" update-ref -d refs/notes/amont-attest-inputs
 assert_eq "canon: the inputs ref deleted too: nothing" "$(covered_in_clone)" ""
+
+# The two signers make the same block: the same payload, and with the same
+# ed25519 key the same signature, so whichever signs second finds it there.
+# ATTEST_GIT_ATTEST names the binary (Makefile sets it).
+if [ -n "${ATTEST_GIT_ATTEST:-}" ] && [ -x "$ATTEST_GIT_ATTEST" ]; then
+    spec_repo 'ci-test src Cargo.toml ?build.rs'
+    (cd "$R" && bash "$SIGN" --gates "ci-test ci-fmt" --platform x86_64-linux --no-push < "$WORK/key" > /dev/null 2>&1)
+    OUT=$(cd "$R" && "$ATTEST_GIT_ATTEST" sign --gates "ci-test ci-fmt" --platform x86_64-linux --no-push --github-output < "$WORK/key" 2> "$WORK/err"); RC=$?
+    ERR=$(cat "$WORK/err")
+    expect "git-attest sign after sign.sh: the identical block is already there" 0 \
+        "status=already-present|signed=false|pushed=false|gates=ci-test ci-fmt|inputs=1/1"
+fi
 
 summary

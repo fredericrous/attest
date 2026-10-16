@@ -14,12 +14,15 @@
 # verifier: it reads fingerprints, but not a spec with an optional `?path`
 # (1.4.0), which it rejects as a wildcard — so such a spec only loses skips.
 # `fp14` is a 1.4.x verifier: it reads optional paths, but not the `canon` line
-# of 1.5.0, which it ignores — so a canonical claim only loses a skip.
+# of 1.5.0, which it ignores — so a canonical claim only loses a skip. `fp15`
+# is a 1.5.x verifier: it reads `canon`, but not the `@plan-exempt off`
+# directive of 1.6.0, which invalidates its spec without switching the
+# canonical route off — the reason an opt-out writes both forms until 2.0.0.
 set -u
 
 # shellcheck disable=SC2034  # read by lib.sh
-IMPL=${1:?usage: compat-fields.sh <implementation command> old|fp13|fp14|new}
-AGE=${2:?usage: compat-fields.sh <implementation command> old|fp13|fp14|new}
+IMPL=${1:?usage: compat-fields.sh <implementation command> old|fp13|fp14|fp15|new}
+AGE=${2:?usage: compat-fields.sh <implementation command> old|fp13|fp14|fp15|new}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 # The helper is sourced, which shellcheck follows only under -x; the hook
@@ -70,7 +73,7 @@ EOF
 fp=$(fp_of "$R" test)
 attach_input "$R" "$(payload_for "$R" test "$PLATFORM" "" "test=$fp")" "$WORK/key" test "$fp"
 move_tree "$R"
-if [ "$AGE" = new ] || [ "$AGE" = fp14 ]; then
+if [ "$AGE" = new ] || [ "$AGE" = fp14 ] || [ "$AGE" = fp15 ]; then
     check "a spec with an optional path is read" "test" "$R"
 else
     check "a spec with an optional path covers nothing here" "" "$R"
@@ -106,10 +109,32 @@ git -C "$R" add -A; git -C "$R" commit -q -m src
 c=$(canon_fp "$R")
 attach_canon "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c")" "$WORK/key" "$c"
 echo edited > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
-if [ "$AGE" = new ]; then
+if [ "$AGE" = new ] || [ "$AGE" = fp15 ]; then
     check "a block reachable only by its canonical tree is reported" "test" "$R"
 else
     check "a block reachable only by its canonical tree is not reported" "" "$R"
 fi
+
+# The opt-out directive (1.6.0). Alone, a 1.5.x verifier still uses the
+# canonical tree: it reads the directive as an invalid gate name, which only
+# disables input fingerprints. With amont.conf's line too, nobody does.
+optout_repo() { # attest-inputs [amont.conf]
+    make_repo "$R" signer@example.org "$WORK/key"
+    mkdir -p "$R/docs/plans" "$R/.github"; echo p > "$R/docs/plans/a.md"; echo c > "$R/code.txt"
+    printf '%b' "$1" > "$R/.github/attest-inputs"
+    if [ $# -gt 1 ]; then printf '%b' "$2" > "$R/amont.conf"; fi
+    git -C "$R" add -A; git -C "$R" commit -q -m src
+    c=$(canon_fp "$R")
+    attach_canon "$R" "$(payload_for "$R" test "$PLATFORM" | with_canon "$c")" "$WORK/key" "$c"
+    echo edited > "$R/docs/plans/a.md"; git -C "$R" commit -qam plan-edit
+}
+optout_repo '@plan-exempt off\n'
+if [ "$AGE" = fp15 ]; then
+    check "the directive alone: a 1.5.x verifier still covers by canonical tree" "test" "$R"
+else
+    check "the directive alone: nothing by canonical tree" "" "$R"
+fi
+optout_repo '@plan-exempt off\n' 'set planExempt off\n'
+check "both opt-outs: nothing by canonical tree, whatever the version" "" "$R"
 
 summary

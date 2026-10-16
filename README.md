@@ -138,6 +138,19 @@ ASCII paths only, no spaces; name a parent directory instead. Over-broad is
 safe, under-broad is a silent false skip — so this file is a trust boundary
 exactly like `allowed_signers`, and belongs in the same CODEOWNERS line.
 
+**Plan-only commits.** Since 1.5.0 an attestation also covers a tree that
+differs only in the *content* of files under the top-level `docs/plans/`
+(SPEC.md, "Canonical tree"), with nothing to declare. A repository whose gate
+reads the contents of a plan (a whole-tree formatter, a link checker) opts out
+with one line in its `attest-inputs`:
+
+```
+@plan-exempt off
+```
+
+Until 2.0.0, also keep `set planExempt off` in `amont.conf`: verifiers older
+than 1.6.0 know only that form.
+
 The attestation is only as honest as the machine that made it. The signing key
 is a file on that machine, and anything running there as you can sign with it;
 so can anything that runs your test suite as you. Nothing here protects
@@ -207,10 +220,10 @@ conviction: trust what was verified, never what was reported.
 |---|---|
 | [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format, input fingerprints included |
 | [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo |
-| [`sign/`](sign/) | the CI producer: `sign/action.yml` wraps `sign/sign.sh` |
+| [`sign/`](sign/) | the CI producer: `sign/action.yml` wraps `sign/sign.sh`, which `git-attest sign` replaces |
 | [`.github/attest-inputs`](.github/attest-inputs) | this repository's own input spec: the dogfood, and a template |
 | [`verify.sh`](verify.sh) | the verifier the action runs. `git` and `ssh-keygen`, nothing else |
-| `src/` | `git-attest`, the same contract as a binary |
+| `src/` | the `git_attest` library, the one implementation of the format (decisions ADR-0037) that amont links, and `git-attest`, its command line |
 | [`tests/conformance.sh`](tests/conformance.sh) | the fixtures both implementations must pass |
 
 ### Forgejo
@@ -227,6 +240,8 @@ Same file, full-URL `uses:`:
 cargo install git-attest
 git-attest covered                     # names, or nothing
 git-attest explain                     # ...and why
+git-attest sign --gates "NAMES" < key  # attest what this job ran (sign.sh's flags)
+git-attest check-inputs --require GATE # does attest-inputs cover every tracked file?
 ```
 
 `git-attest explain` is the answer to "why didn't it skip?", which is otherwise

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **One implementation, as a library** (decisions ADR-0037). `git-attest` is
+  now the std-only `git_attest` library with the binary as a thin command line
+  over it: `format`, `spec`, `fingerprint`, `sign`, `notes`, `produce` and
+  `verify`. Every entry point takes the repository as a path and never reads
+  the working directory, errors are typed, and nothing prints. amont links it
+  in place of its own copies.
+- **`git-attest sign`.** `sign/sign.sh`'s flags, outputs and exit contract,
+  over the library; `tests/sign.sh` runs against both, and both make the
+  identical block.
+- **`git-attest check-inputs --require GATE... [--tree REV]`.** Proves that
+  `attest-inputs` declares every tracked file for the named gates, moved from
+  `amont attest check-inputs` with the same output and exit codes.
+- **`@plan-exempt off`.** The canonical opt-out moves into `attest-inputs`,
+  read by the library and by both shell scripts. `set planExempt off` in
+  `amont.conf` is still read and reported as deprecated; until 2.0.0 an
+  opt-out writes both, because a verifier before 1.6.0 reads the directive as
+  an invalid gate name (which disables its fingerprints, not its canonical
+  tree).
+- **Known answers** for the payload (blocks captured from `sign.sh` 1.5.1 and
+  amont 1.57.0), the spec grammar and the note keys, in `tests/vectors/`.
+- The release publishes to crates.io or fails: amont depends on the crate.
+
 ## 1.5.1
 
 - **SPEC: `amont-provenance-v1`.** The format of the signed record amont

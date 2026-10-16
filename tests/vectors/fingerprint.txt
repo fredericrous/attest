@@ -1,0 +1,54 @@
+# Known answers for SPEC.md, "Input fingerprints" and "Canonical tree": the
+# implicit inputs every fingerprint lists, and the synthetic note keys. The
+# keys were computed with `git hash-object --stdin` over the SPEC's preimage,
+# in a sha1 and in a sha256 repository, independently of any implementation.
+#
+# The format is strict, and a reader refuses anything else:
+#
+#   case <name>            opens a case; outside one only comments (#) and
+#                          blank lines may appear
+#   implicit <tokens>      the declared paths of a gate, `?` markers removed;
+#   out <path>             answered by the implicit inputs, in order
+#   key <format> <gate> <fp>     K(gate, fp) in a <format> (sha1|sha256)
+#   canon-key <format> <canon>   Kc(canon)   repository, answered by one
+#   out <oid>                    `out` line
+#   end                    closes the case
+
+case one directory: the spec files, .gitmodules, the root .gitattributes
+implicit src
+out .forgejo/attest-inputs
+out .github/attest-inputs
+out .gitmodules
+out .gitattributes
+end
+
+case every ancestor's .gitattributes, sorted and once each
+implicit src/deep/x.rs x/y src/z
+out .forgejo/attest-inputs
+out .github/attest-inputs
+out .gitmodules
+out .gitattributes
+out src/.gitattributes
+out src/deep/.gitattributes
+out x/.gitattributes
+end
+
+case K(gate, fp) in a sha1 repository
+key sha1 test 1111111111111111111111111111111111111111
+out 5a18b1eadae0be6041132610a1535256fb480906
+end
+
+case K(gate, fp) of a sha256 fingerprint in a sha256 repository
+key sha256 lint aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+out 0746ffe5ade26f313174c721d5d317af96c0b49107852e4aa66c50de5c8ad097
+end
+
+case Kc(canon) in a sha1 repository
+canon-key sha1 1111111111111111111111111111111111111111
+out 595a82c0c99f58d65fed94986406d7cb10042542
+end
+
+case Kc(canon) in a sha256 repository
+canon-key sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+out d43d3309b2adeb2b6a3f8b980f78a29cadf521e9f83759b060dde1ae7c881cec
+end

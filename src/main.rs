@@ -5,8 +5,9 @@
 //! else: CI that is neither GitHub nor Forgejo, and a laptop asking why a skip
 //! did not happen.
 
-mod attest;
-mod git;
+mod cli_sign;
+
+use git_attest::{format, verify as attest};
 
 const USAGE: &str = "\
 git-attest — what a signed attestation covers for the tree checked out here
@@ -15,6 +16,8 @@ git-attest — what a signed attestation covers for the tree checked out here
                      [--anywhere \"NAMES\"] [--include-local]
                      [--json | --github-output]
   git-attest explain [same flags]
+  git-attest sign --gates \"NAMES\" [flags] < private-key   (see `git-attest sign --help`)
+  git-attest check-inputs --require GATE... [--tree REV]
 
   covered   print the covered gate names, or nothing. Always exits 0: every
             failure means \"run the tests\", which is the caller's default
@@ -22,6 +25,10 @@ git-attest — what a signed attestation covers for the tree checked out here
             handle.
   explain   print the same answer with the reasoning that produced it, on
             stderr. Use it when a skip you expected did not happen.
+  check-inputs
+            do the named gates declare, in attest-inputs, every file the tree
+            (default HEAD) tracks? Exit 0 yes, 1 a file is not covered, 2 the
+            spec or git cannot answer: a guard that cannot answer fails.
 
   --signers PATH    default: .forgejo/allowed_signers, then
                     .github/allowed_signers. A relative PATH is resolved from
@@ -128,6 +135,58 @@ fn as_json(gates: &[String]) -> String {
     out
 }
 
+/// `check-inputs --require <gate>... [--tree <rev>]`: the same flags and
+/// output as `amont attest check-inputs`.
+fn check_inputs(args: &[String]) -> u8 {
+    let mut tree = "HEAD".to_string();
+    let mut required = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tree" => match args.get(i + 1) {
+                Some(t) => {
+                    tree = t.clone();
+                    i += 1;
+                }
+                None => {
+                    eprintln!("git-attest: --tree needs a value");
+                    return 2;
+                }
+            },
+            "--require" => {
+                while let Some(g) = args.get(i + 1).filter(|a| !a.starts_with("--")) {
+                    required.push(g.clone());
+                    i += 1;
+                }
+            }
+            other => {
+                eprintln!("git-attest: unknown argument {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    if required.is_empty() {
+        eprintln!("git-attest: check-inputs needs --require <gate>...");
+        return 2;
+    }
+    let here = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match git_attest::spec::check_coverage(&here, &tree, &required) {
+        Err(e) => {
+            eprintln!("{}", e.render(&tree));
+            2
+        }
+        Ok(f) if f.is_empty() => {
+            println!("check-attest-inputs: ok");
+            0
+        }
+        Ok(f) => {
+            eprint!("{}", f.render());
+            1
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = run(&args);
@@ -149,6 +208,8 @@ fn run(args: &[String]) -> u8 {
             return 0;
         }
         "covered" | "explain" => {}
+        "sign" => return cli_sign::run(&args[1..]),
+        "check-inputs" => return check_inputs(&args[1..]),
         other => {
             eprintln!("git-attest: unknown subcommand `{other}`");
             eprint!("{USAGE}");
@@ -182,15 +243,21 @@ fn run(args: &[String]) -> u8 {
             trail,
             notes,
             loud,
+            warnings,
         } = verdict;
         // A change to the repository's refs is always reported, `explain` or
         // not: data went away, and the line says how to bring it back.
         for line in &loud {
             eprintln!("attest: {line}");
         }
+        // `explain` says the warnings where they arose, in the trail.
         if explain {
             for step in &trail {
                 eprintln!("attest: {step}");
+            }
+        } else {
+            for line in &warnings {
+                eprintln!("attest: {line}");
             }
         }
         if gha {
@@ -210,10 +277,11 @@ fn run(args: &[String]) -> u8 {
         0
     };
 
+    let here = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let Some(signers) = signers
         .as_deref()
-        .map(attest::resolve_signers)
-        .or_else(attest::default_signers)
+        .map(|s| attest::resolve_signers(&here, s))
+        .or_else(|| attest::default_signers(&here))
     else {
         return done(attest::Verdict {
             gates: Vec::new(),
@@ -222,6 +290,7 @@ fn run(args: &[String]) -> u8 {
             ],
             notes: None,
             loud: Vec::new(),
+            warnings: Vec::new(),
         });
     };
 
@@ -232,10 +301,11 @@ fn run(args: &[String]) -> u8 {
     let want = match platform.as_deref() {
         Some("any") => None,
         Some(explicit) => Some(explicit.to_string()),
-        None => Some(attest::platform()),
+        None => Some(format::platform()),
     };
 
     done(attest::evaluate(
+        &here,
         &signers,
         principal.as_deref(),
         want.as_deref(),
@@ -348,10 +418,10 @@ mod tests {
     #[test]
     fn split_note_restores_the_signed_trailing_newline() {
         let body = "amont-attest-v2\ntree abc\n\n-----BEGIN SSH SIGNATURE-----\nx";
-        let (payload, sig) = attest::split_note(body).unwrap();
+        let (payload, sig) = format::split_note(body).unwrap();
         assert_eq!(payload, "amont-attest-v2\ntree abc\n");
         assert!(sig.starts_with("-----BEGIN SSH SIGNATURE-----"));
-        assert!(attest::split_note("no blank line here").is_none());
-        assert!(attest::split_note("payload\n\nnot a signature").is_none());
+        assert!(format::split_note("no blank line here").is_none());
+        assert!(format::split_note("payload\n\nnot a signature").is_none());
     }
 }

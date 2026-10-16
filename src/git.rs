@@ -1,5 +1,9 @@
 //! Just enough git to read notes and resolve objects.
 //!
+//! Every call runs in a directory the caller names, never the process's
+//! working directory: a library called from a hook or a test must answer for
+//! the repository it was handed.
+//!
 //! Subprocesses rather than a git library, for the same reason the signing
 //! side shells out to `ssh-keygen`: the answer must be the one the user's own
 //! `git` gives, including their config, their `core.notesRef`, and whatever
@@ -9,12 +13,15 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Stdout of `git <args>`, trimmed. `None` when git is missing, or exits
-/// non-zero, or wrote nothing — three failures with one correct response
-/// ("no answer"), which is why they collapse here rather than at each site.
-pub fn stdout(args: &[&str]) -> Option<String> {
+/// Stdout of `git <args>` run inside `dir`, trimmed. `None` when git is
+/// missing, or exits non-zero, or wrote nothing — three failures with one
+/// correct response ("no answer"), which is why they collapse here rather
+/// than at each site.
+pub fn stdout_in(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
+        .current_dir(dir)
         .args(args)
+        .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()?;
@@ -25,12 +32,7 @@ pub fn stdout(args: &[&str]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Did `git <args>` exit 0? Output discarded.
-pub fn succeeds(args: &[&str]) -> bool {
-    exit_code(args) == Some(0)
-}
-
-/// The same, run inside `dir`.
+/// Did `git <args>`, run inside `dir`, exit 0? Output discarded.
 pub fn succeeds_in(dir: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .current_dir(dir)
@@ -41,18 +43,6 @@ pub fn succeeds_in(dir: &Path, args: &[&str]) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// The exit code of `git <args>`, output discarded. `None` when git could not
-/// be run at all or was killed by a signal.
-pub fn exit_code(args: &[&str]) -> Option<i32> {
-    Command::new("git")
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?
-        .code()
 }
 
 /// The raw, untrimmed stdout of `git <args>` run inside `dir`. `None` unless
@@ -120,28 +110,29 @@ pub const REMOTE_BUDGET_SECS: u64 = 15;
 /// configured their own ssh command; curl's low-speed limit for a stalled
 /// transfer; and a deadline of our own on top, because curl's limit only
 /// starts once a connection is up.
-pub fn remote(args: &[&str]) -> Remote {
+pub fn remote(dir: &Path, args: &[&str]) -> Remote {
     use std::time::{Duration, Instant};
     let mut cmd = Command::new("git");
-    cmd.args([
-        "-c",
-        "http.lowSpeedLimit=1",
-        "-c",
-        "http.lowSpeedTime=10",
-        "-c",
-        "credential.interactive=never",
-    ])
-    .args(args)
-    .env("GIT_TERMINAL_PROMPT", "0")
-    .env("GIT_ASKPASS", "")
-    .env("GCM_INTERACTIVE", "never")
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    cmd.current_dir(dir)
+        .args([
+            "-c",
+            "http.lowSpeedLimit=1",
+            "-c",
+            "http.lowSpeedTime=10",
+            "-c",
+            "credential.interactive=never",
+        ])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     let set = |v: &str| std::env::var_os(v).is_some_and(|v| !v.is_empty());
     let own_ssh = set("GIT_SSH_COMMAND")
         || set("GIT_SSH")
-        || succeeds(&["config", "--get", "core.sshCommand"]);
+        || succeeds_in(dir, &["config", "--get", "core.sshCommand"]);
     if !own_ssh {
         cmd.env(
             "GIT_SSH_COMMAND",

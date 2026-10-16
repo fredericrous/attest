@@ -105,34 +105,45 @@ jobs:
           body: |
             Pin by commit: `uses: fredericrous/attest@${{ github.sha }} # v${{ needs.guard.outputs.version }}`
 
-  # crates.io is OPTIONAL here, and the job says so rather than failing.
+  # crates.io is REQUIRED since 1.6.0 (decisions ADR-0037): amont's hook links
+  # the git-attest library, so a release that is not on crates.io is a
+  # release amont cannot use. A missing CARGO_REGISTRY_TOKEN fails the job,
+  # which keeps `v1` where it is.
   #
-  # The primary artifact of this repository is the action, which is consumed by
-  # `uses:` and needs no registry at all. Wiring the release so a missing
-  # CARGO_REGISTRY_TOKEN takes the whole release down would hold the action
-  # hostage to a distribution channel nobody has asked for yet.
-  #
-  # To enable it: `gh secret set CARGO_REGISTRY_TOKEN --repo fredericrous/attest`.
+  # To set it: `gh secret set CARGO_REGISTRY_TOKEN --repo fredericrous/attest`.
   publish-crates:
     needs: [guard, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - id: token
+      - name: CARGO_REGISTRY_TOKEN is set
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -eu
-          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "have=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "have=no" >> "$GITHUB_OUTPUT"
-            echo "::notice::no CARGO_REGISTRY_TOKEN — skipping crates.io"
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::no CARGO_REGISTRY_TOKEN; the library must reach crates.io"
+            exit 1
           fi
-      - if: steps.token.outputs.have == 'yes'
-        run: cargo publish --locked
+      - run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # Published is not resolvable: the index can lag. A consumer's
+      # `cargo build` is what has to work, so ask the registry the way it will.
+      - name: the version resolves on crates.io
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -eu
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if cargo info "git-attest@$VERSION" > /dev/null 2>&1; then
+              echo "git-attest@$VERSION resolves"
+              exit 0
+            fi
+            sleep $((i * 6))
+          done
+          echo "::error::git-attest@$VERSION does not resolve on crates.io"
+          exit 1
 
   # `uses: fredericrous/attest@v1` is how an action is pinned, so the major
   # alias has to follow the releases. This is the one tag that legitimately

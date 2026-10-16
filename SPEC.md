@@ -264,6 +264,10 @@ before anything is parsed, and identical in both implementations:
   listing and so the fingerprint change. This is how a gate says "nothing
   here yet, and it matters if there is": a config file that changes a tool's
   verdict, a build script, a directory the build tool discovers by itself.
+- **The directive** (1.6.0). A line whose first token starts with `@` is a
+  directive, never a gate. The only one is `@plan-exempt off` (blanks around
+  and between the two words; see "Canonical tree", "Opt-out"); any other is
+  invalid. A spec may hold the directive alone and declare no gate.
 - **Any violation invalidates the whole spec**, never one line: a line that
   silently dropped out would be one the author believes is protecting
   something.
@@ -362,16 +366,34 @@ canonical text each must give; every implementation reads that one file
 `amont-provenance-v1` (see "Content id"), which ignores whether a plan
 exists.
 
-**Opt-out.** A repository whose gate reads the contents of a plan sets
-`set planExempt off` in `amont.conf`. Every producer and verifier reads that
-one policy, `plan_exempt_off(T)`, from the bytes of `T:amont.conf` itself:
-strip CR, trim blanks, split on blanks, compare the words `set`, `planExempt`
-and `off` ASCII case-insensitively; a line that is not exactly those three
-words does not match, and any match anywhere is off. It fails narrow: an
-`ls-tree` that fails, or a listed `amont.conf` that cannot be read, is off;
-only a successful `ls-tree` that does not list the file is on. When off, a
-producer writes no `canon` line and no canonical key, and a verifier ignores
-canonical equality in every block, whichever key found it.
+**Opt-out.** A repository whose gate reads the contents of a plan writes
+`@plan-exempt off` in its `attest-inputs` (1.6.0). Every producer and verifier
+reads one policy, `plan_exempt_off(T)`, from the committed bytes of `T`. It is
+off when either holds:
+
+- a line of `T:.forgejo/attest-inputs` or `T:.github/attest-inputs` is the
+  directive: blanks around and between the words `@plan-exempt` and `off`,
+  nothing else. It is found even in a spec that is otherwise invalid, since
+  off only narrows;
+- a line of `T:amont.conf` says `set planExempt off`: strip CR, trim blanks,
+  split on blanks, compare the three words ASCII case-insensitively; a line
+  that is not exactly those three words does not match. This form is
+  **deprecated** and read until 2.0.0; a verifier that finds it alone says
+  `deprecated: planExempt in amont.conf; also write @plan-exempt off in
+  attest-inputs`.
+
+It fails narrow: an `ls-tree` that fails, or a listed file that cannot be
+read, is off; only successful listings and readings that hold neither form
+are on. When off, a producer writes no `canon` line and no canonical key, and
+a verifier ignores canonical equality in every block, whichever key found it.
+
+**Until 2.0.0, write both.** A verifier or producer before 1.6.0 reads the
+directive as an invalid gate name: that disables its input fingerprints, but
+not its canonical route. A repository that opts out therefore commits both
+`@plan-exempt off` and `set planExempt off` until no consumer older than 1.6.0
+remains (decisions ADR-0037). A repository whose `attest-inputs` declares
+gates gains the directive only once its own consumers are at 1.6.0 or later,
+since to older ones the directive invalidates those gates' fingerprints.
 
 **The payload line.** `canon <oid>`: exactly two blank-separated fields and
 an oid of 40 or 64 lowercase hex digits, after the `input` lines and before
