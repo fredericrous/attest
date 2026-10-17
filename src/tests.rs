@@ -839,3 +839,211 @@ fn a_tree_git_cannot_list_has_no_known_spec() {
     assert!(att.inputs.is_empty());
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+/// A repository whose one commit tracks `files`, and that commit's tree.
+fn committed(name: &str, files: &[(&str, &str)]) -> (std::path::PathBuf, String) {
+    let d = std::env::temp_dir().join(format!("git-attest-cov-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    for (path, body) in files {
+        let p = d.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    std::fs::create_dir_all(&d).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&d)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "--template="]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "fixture"]);
+    let tree = git(&["rev-parse", "HEAD^{tree}"]);
+    (d, tree)
+}
+
+/// What `check_coverage` answers, rendered as the command line prints it.
+enum Answer {
+    Ok,
+    /// Some gate falls short; the report contains each line, and none of
+    /// the lines after `!`.
+    Short(&'static [&'static str], &'static [&'static str]),
+    /// The spec or git cannot answer; the error contains the text.
+    Cannot(&'static str),
+}
+
+/// One row: what it shows, the files committed, the gates required, and the
+/// answer.
+type CoverageCase = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+    Answer,
+);
+
+/// Every way a declaration can look complete and not be, through the
+/// library's own entry point. These were amont's `attest check-inputs`
+/// integration tests; the proof is attest's, so the cases live here
+/// (decisions ADR-0037), and amont keeps only its wiring.
+#[test]
+fn check_coverage_answers_every_way_a_declaration_falls_short() {
+    const SPEC: &str = ".github/attest-inputs";
+    let cases: &[CoverageCase] = &[
+        (
+            "a gate declaring every tracked file is covered",
+            &[
+                (SPEC, "g crates README.md\n"),
+                ("crates/a/x.rs", "x"),
+                ("README.md", "r"),
+            ],
+            &["g"],
+            Answer::Ok,
+        ),
+        (
+            "a subdirectory does not stand for its parent",
+            &[
+                (SPEC, "g crates/foo\n"),
+                ("crates/foo/x.rs", "x"),
+                ("crates/bar/y.rs", "y"),
+            ],
+            &["g"],
+            Answer::Short(
+                &["g: not covered:", "  crates/bar/y.rs"],
+                &["  crates/foo/x.rs"],
+            ),
+        ),
+        (
+            "a path omitted from one gate is not rescued by another",
+            &[
+                (SPEC, "full a.txt b.txt\npartial a.txt\n"),
+                ("a.txt", "a"),
+                ("b.txt", "b"),
+            ],
+            &["full", "partial"],
+            Answer::Short(
+                &["partial: not covered:", "  b.txt"],
+                &["full: not covered"],
+            ),
+        ),
+        (
+            "a required gate the spec does not declare fails",
+            &[(SPEC, "g a.txt\n"), ("a.txt", "a")],
+            &["g", "other"],
+            Answer::Short(&["other: not declared in the spec"], &[]),
+        ),
+        (
+            "plans are exempt but every other docs child is not",
+            &[
+                (SPEC, "g README.md\n"),
+                ("README.md", "r"),
+                ("docs/plans/p.md", "p"),
+                ("docs/guide.md", "g"),
+            ],
+            &["g"],
+            Answer::Short(&["  docs/guide.md"], &["docs/plans"]),
+        ),
+        (
+            "the spec itself and the root git files need no declaration",
+            &[
+                (SPEC, "g a.txt\n"),
+                ("a.txt", "a"),
+                (".gitattributes", "* text=auto\n"),
+                (".gitmodules", ""),
+            ],
+            &["g"],
+            Answer::Ok,
+        ),
+        (
+            "a name outside the grammar is covered by an ASCII ancestor",
+            &[(SPEC, "g src\n"), ("src/caf\u{e9}.txt", "x")],
+            &["g"],
+            Answer::Ok,
+        ),
+        (
+            "a name outside the grammar is not covered without one",
+            &[
+                (SPEC, "g src\n"),
+                ("src/a.txt", "a"),
+                ("caf\u{e9}.txt", "x"),
+            ],
+            &["g"],
+            Answer::Short(&["g: not covered:", "caf"], &[]),
+        ),
+        (
+            "an optional path counts as declared even when absent",
+            &[(SPEC, "g a.txt ?build.rs\n"), ("a.txt", "a")],
+            &["g"],
+            Answer::Ok,
+        ),
+        (
+            "a required path that is missing cannot be fingerprinted",
+            &[(SPEC, "g a.txt nope\n"), ("a.txt", "a")],
+            &["g"],
+            Answer::Short(&["g: cannot be fingerprinted"], &[]),
+        ),
+        (
+            "no spec cannot answer",
+            &[("a.txt", "a")],
+            &["g"],
+            Answer::Cannot("no .forgejo/attest-inputs or"),
+        ),
+        (
+            "a glob invalidates the whole spec",
+            &[(SPEC, "g src/*\n"), ("a.txt", "a")],
+            &["g"],
+            Answer::Cannot("is invalid"),
+        ),
+        (
+            "two specs cannot answer",
+            &[
+                (SPEC, "g a.txt\n"),
+                (".forgejo/attest-inputs", "g a.txt\n"),
+                ("a.txt", "a"),
+            ],
+            &["g"],
+            Answer::Cannot("both"),
+        ),
+    ];
+    for (i, (case, files, required, want)) in cases.iter().enumerate() {
+        let (repo, tree) = committed(&format!("{i}"), files);
+        let required: Vec<String> = required.iter().map(|g| g.to_string()).collect();
+        match (check_coverage(&repo, &tree, &required), want) {
+            (Ok(f), Answer::Ok) => assert!(f.is_empty(), "{case}:\n{}", f.render()),
+            (Ok(f), Answer::Short(has, lacks)) => {
+                let report = f.render();
+                assert!(!f.is_empty(), "{case}: reported covered");
+                for line in *has {
+                    assert!(report.contains(line), "{case}: no {line:?} in\n{report}");
+                }
+                for line in *lacks {
+                    assert!(!report.contains(line), "{case}: {line:?} in\n{report}");
+                }
+            }
+            (Err(e), Answer::Cannot(text)) => {
+                let said = e.render(&tree);
+                assert!(said.contains(text), "{case}: no {text:?} in {said}");
+            }
+            (Ok(f), Answer::Cannot(_)) => panic!("{case}: answered\n{}", f.render()),
+            (Err(e), _) => panic!("{case}: could not answer: {}", e.render(&tree)),
+        }
+        // The spec is read from the tree: a working copy claiming less
+        // changes nothing.
+        if matches!(want, Answer::Ok) {
+            std::fs::write(repo.join(SPEC), "g\n").unwrap();
+            let f = check_coverage(&repo, &tree, &required).unwrap();
+            assert!(
+                f.is_empty(),
+                "{case}, after editing the working copy:\n{}",
+                f.render()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+}
