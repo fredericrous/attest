@@ -45,3 +45,19 @@ FMdSDMZZU7cr8UQwUAAAAMYW1vbnQtYXR0ZXN0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz
 aC1lZDI1NTE5AAAAQFPG0k3hgnpUeidQVYoIqSqiMG9bCJ2PpKxPX4zLb74Hhy+z8g5y0Q
 +tDrUMO0SvWh2a3c57P3i39ers0JRopgk=
 -----END SSH SIGNATURE-----
+
+amont-attest-v2
+tree 06a1ca0ef9ccb34139b66f0a01a91d4555d57d70
+gates pre-push-cargo-test ci-conformance
+platform aarch64-macos
+input pre-push-cargo-test 8c86ddecff415cfe748fe55b78f7efee9030ebf0
+input ci-conformance bd8cf81369a0d6c14526953bc419f09dffaa1e4d
+canon ebc1a9a1fdda84ec03e0b8dd9f41eff90d4ebc00
+amont attest-sign
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgISqqVE8csJZGVEMH5J21/VFM+8
+FMdSDMZZU7cr8UQwUAAAAMYW1vbnQtYXR0ZXN0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz
+aC1lZDI1NTE5AAAAQCUBTgVCCT2eAlq/w8ceqgH79ZELHp/R/wSb+5Bcx4SwvSmy9ayyRi
+qZt8eGS91eBFLlodYoHvnvThzPfqD/zgg=
+-----END SSH SIGNATURE-----
