@@ -879,6 +879,15 @@ enum Answer {
     Cannot(&'static str),
 }
 
+/// One row: what it shows, the files committed, the gates required, and the
+/// answer.
+type CoverageCase = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+    Answer,
+);
+
 /// Every way a declaration can look complete and not be, through the
 /// library's own entry point. These were amont's `attest check-inputs`
 /// integration tests; the proof is attest's, so the cases live here
@@ -886,7 +895,7 @@ enum Answer {
 #[test]
 fn check_coverage_answers_every_way_a_declaration_falls_short() {
     const SPEC: &str = ".github/attest-inputs";
-    let cases: &[(&str, &[(&str, &str)], &[&str], Answer)] = &[
+    let cases: &[CoverageCase] = &[
         (
             "a gate declaring every tracked file is covered",
             &[
