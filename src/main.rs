@@ -7,6 +7,7 @@
 
 mod cli_sign;
 
+use git_attest::notes::Mirror;
 use git_attest::{format, verify as attest};
 
 const USAGE: &str = "\
@@ -47,14 +48,18 @@ git-attest — what a signed attestation covers for the tree checked out here
                     `sign.sh --no-push` that never reached origin, so origin
                     cannot revoke them. Off by default.
   --json            print a JSON array instead of a space-separated list
-  --github-output   print `covered=`, `gates=`, `notes=` and `inputs_notes=`
-                    lines ready to append to $GITHUB_OUTPUT
+  --github-output   print `covered=`, `gates=`, `notes=`, `inputs_notes=`,
+                    `legacy_notes=` and `legacy_inputs_notes=` lines ready
+                    to append to $GITHUB_OUTPUT
 
   A committed .github/attest-inputs (or .forgejo/) names the paths each gate
   reads; a gate is then also covered by an attestation of any tree whose
-  declared inputs are identical. refs/notes/amont-attest[-inputs] are
-  origin's mirror: fetched, deleted when origin no longer has them, and not
-  read when origin is configured but cannot be reached.
+  declared inputs are identical. refs/notes/greengate-attest[-inputs] and
+  the older refs/notes/amont-attest[-inputs] are origin's mirror: fetched,
+  deleted when origin no longer has them, and not read when origin is
+  configured but cannot be reached. The greengate ref is read first; the
+  amont one only for an object it has no note for. Every verification prints
+  the name it went through (`verified under greengate-attest`).
 ";
 
 #[derive(Default, Debug, PartialEq)]
@@ -242,8 +247,11 @@ fn run(args: &[String]) -> u8 {
             gates,
             trail,
             notes,
+            legacy_notes,
+            verified_under,
             loud,
             warnings,
+            ..
         } = verdict;
         // A change to the repository's refs is always reported, `explain` or
         // not: data went away, and the line says how to bring it back.
@@ -260,15 +268,26 @@ fn run(args: &[String]) -> u8 {
                 eprintln!("attest: {line}");
             }
         }
+        // The name each covering block verified under, in every mode, as
+        // verify.sh does: the rollout counts these lines.
+        for ns in &verified_under {
+            eprintln!("attest: verified under {ns}");
+        }
         if gha {
             // Both forms. `covered` is the legacy string a downstream
             // `contains()` matches as a SUBSTRING; `gates` is the array form
             // that matches element-wise and is the one to use.
             println!("covered={}", gates.join(" "));
             println!("gates={}", as_json(&gates));
-            let (m, i) = notes.map_or(("", ""), |(m, i)| (m.as_str(), i.as_str()));
-            println!("notes={m}");
-            println!("inputs_notes={i}");
+            let states = |pair: Option<(Mirror, Mirror)>| {
+                pair.map_or(("", ""), |(main, inputs)| (main.as_str(), inputs.as_str()))
+            };
+            let (notes_state, inputs_state) = states(notes);
+            println!("notes={notes_state}");
+            println!("inputs_notes={inputs_state}");
+            let (notes_state, inputs_state) = states(legacy_notes);
+            println!("legacy_notes={notes_state}");
+            println!("legacy_inputs_notes={inputs_state}");
         } else if json {
             println!("{}", as_json(&gates));
         } else if !gates.is_empty() {
@@ -283,15 +302,9 @@ fn run(args: &[String]) -> u8 {
         .map(|s| attest::resolve_signers(&here, s))
         .or_else(|| attest::default_signers(&here))
     else {
-        return done(attest::Verdict {
-            gates: Vec::new(),
-            trail: vec![
-                "no allowed_signers found (.forgejo/ or .github/) at the repository root".into(),
-            ],
-            notes: None,
-            loud: Vec::new(),
-            warnings: Vec::new(),
-        });
+        return done(attest::Verdict::nothing(
+            "no allowed_signers found (.forgejo/ or .github/) at the repository root",
+        ));
     };
 
     // `any` is the deliberate, committed statement that a suite's result does

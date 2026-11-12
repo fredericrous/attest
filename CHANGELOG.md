@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **Verifiers read both note names** (decisions ADR-0068, plan
+  greengate-signs-notes-under-green-names, Phase 1). `format::LEGACY` and
+  `format::GREEN` hold the two name sets (header, notes and inputs refs, SSH
+  namespace, fingerprint domains, producer word); `format::WRITE` (LEGACY until
+  Phase 4) is the one owner of what is written: `FORMAT`, `NOTES_REF`,
+  `INPUTS_REF`, `NAMESPACE`, `payload`'s producer word, `fingerprint::key` /
+  `canon_key` and their preimages, and `notes::sync_mirrors` derive from it, so
+  their values are unchanged and the writers (`sign`, `produce`, `sign.sh`)
+  still write the legacy names.
+- `evaluate`, `verify.sh` and `git-attest covered` read
+  `refs/notes/greengate-attest[-inputs]` first and
+  `refs/notes/amont-attest[-inputs]` only for an object the first holds no
+  note for (a listed but unreadable note counts as a note); a note is checked
+  whole under the namespace and key domains of the ref it sits in, and its
+  header must match, never mixed. New: `fingerprint::key_in`, `canon_key_in`
+  and the `_preimage_in` variants; `notes::sync_mirrors_of(root, names)`
+  returning `notes::Synced`.
+- **Output keys changed meaning.** `notes` and `inputs_notes` (on `Verdict`,
+  in `--github-output` and as the action's outputs) now report the
+  `greengate-attest` refs; the new `legacy_notes` and `legacy_inputs_notes`
+  report the `amont-attest` refs. A workflow that checked `notes == fetched`
+  after signing must read `legacy_notes` until the writers switch.
+- `Verdict` gains `legacy_notes` and `verified_under`, and is now
+  `#[non_exhaustive]` (build one with `Verdict::nothing`). Every verification
+  whose block covered a gate prints `attest: verified under <namespace>` on
+  stderr, in every mode; it is not part of the `--explain` trail (the
+  `Verdict::verified_under` field carries it for library callers, which print
+  it themselves). A second name set is not synced when origin did not
+  answer for the first. See SPEC.md, "Names".
+
 ## 1.8.0
 
 - **Platform-bound signer principals.** A principal ending in
