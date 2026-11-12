@@ -93,15 +93,23 @@ outputs:
     value: ${{ steps.verify.outputs.covered }}
   notes:
     description: >-
-      What became of refs/notes/amont-attest, origin's mirror: fetched, absent
+      What became of refs/notes/greengate-attest, origin's mirror: fetched, absent
       (origin has none; the local mirror was deleted), unreachable (origin did
       not answer; nothing was judged), unwritable (origin's copy could not
       replace a stale local one, a leftover lock say; nothing was judged),
       undeletable, or no-origin.
     value: ${{ steps.verify.outputs.notes }}
   inputs_notes:
-    description: The same, for refs/notes/amont-attest-inputs.
+    description: The same, for refs/notes/greengate-attest-inputs.
     value: ${{ steps.verify.outputs.inputs_notes }}
+  legacy_notes:
+    description: >-
+      The same, for the older refs/notes/amont-attest, which is read for an
+      object the greengate ref has no note for until the old names are removed.
+    value: ${{ steps.verify.outputs.legacy_notes }}
+  legacy_inputs_notes:
+    description: The same, for refs/notes/amont-attest-inputs.
+    value: ${{ steps.verify.outputs.legacy_inputs_notes }}
 
 runs:
   using: composite
@@ -171,6 +179,8 @@ runs:
         # A mirror nobody could fetch covers nothing, silently in the gates —
         # so say it where a fleet-wide slowdown would otherwise hide it.
         # Two checks, not one case: both can be true, and each deserves its line.
+        # The patterns match inside notes=, inputs_notes=, legacy_notes= and
+        # legacy_inputs_notes= alike, so either name set trips them.
         case "$out" in
           *"notes=unreachable"*)
             echo "::warning title=attest::origin's notes could not be fetched; nothing was skipped (see the log above)" ;;

@@ -1,7 +1,8 @@
 //! The attestation format: the payload's fields, the note's blocks, and the
 //! names every producer and verifier shares (SPEC.md, "The note").
 
-/// First token of every payload. A verifier that does not recognise this
+/// First token of every payload (the LEGACY name until Phase 4 of ADR-0068's
+/// plan; see [`LEGACY`]). A verifier that does not recognise this
 /// string must treat the note as absent: an unknown version may mean anything,
 /// and "run the tests" is the only safe reading of anything.
 pub const FORMAT: &str = "amont-attest-v2";
@@ -24,6 +25,59 @@ pub const LOCAL_PREFIX: &str = "attest-local/";
 /// one purpose cannot be replayed for another; an `allowed_signers` entry
 /// pinned to this namespace accepts nothing else.
 pub const NAMESPACE: &str = "amont-attest";
+
+/// One complete set of the names a signed attestation lives under: its header,
+/// the two notes refs, the SSH namespace, the two fingerprint domains and the
+/// payload's producer-line word. A note is read WHOLE under one set (SPEC.md,
+/// "Names"): its header says which, and the namespace, the domains and the
+/// inputs ref follow, so the two sets never mix inside one note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Names {
+    /// First line of every payload.
+    pub format: &'static str,
+    /// The notes ref, as `git notes --ref` wants it.
+    pub notes_ref: &'static str,
+    /// The fingerprint-keyed notes ref.
+    pub inputs_ref: &'static str,
+    /// The `ssh-keygen -Y` namespace.
+    pub namespace: &'static str,
+    /// Domain of the input-fingerprint lookup key.
+    pub input_domain: &'static str,
+    /// Domain of the canonical-tree lookup key.
+    pub canon_domain: &'static str,
+    /// The word that starts the producer line of a payload.
+    pub producer: &'static str,
+}
+
+/// The names notes have been written under since 1.0. The constants
+/// [`FORMAT`], [`NOTES_REF`], [`INPUTS_REF`] and [`NAMESPACE`] equal these
+/// until Phase 4 swaps them to [`GREEN`]: writers (and dependents that sign
+/// with those constants) keep writing LEGACY until then. Removed at the census.
+pub const LEGACY: Names = Names {
+    format: "amont-attest-v2",
+    notes_ref: "amont-attest",
+    inputs_ref: "amont-attest-inputs",
+    namespace: "amont-attest",
+    input_domain: "amont-attest-input",
+    canon_domain: "amont-attest-canon",
+    producer: "amont",
+};
+
+/// The names notes are signed under from Phase 4. Verifiers read them first
+/// and fall back to [`LEGACY`] (SPEC.md, "Names").
+pub const GREEN: Names = Names {
+    format: "greengate-attest-v2",
+    notes_ref: "greengate-attest",
+    inputs_ref: "greengate-attest-inputs",
+    namespace: "greengate-attest",
+    input_domain: "greengate-attest-input",
+    canon_domain: "greengate-attest-canon",
+    producer: "greengate",
+};
+
+/// The order a verifier reads in: the green names win, the legacy names are
+/// read only for an object the green ref has no note for.
+pub const READ_ORDER: [Names; 2] = [GREEN, LEGACY];
 
 /// How many blocks of one note are read. Every block costs two `ssh-keygen`
 /// runs, and the notes ref is writable by anyone with push access.

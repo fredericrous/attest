@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::format::{INPUTS_REF, NOTES_REF};
+use crate::format::{Names, LEGACY};
 use crate::git;
 
 /// What became of one notes ref. SPEC.md, "Lookup".
 ///
-/// `refs/notes/amont-attest[-inputs]` are ORIGIN'S MIRROR, and origin is the
+/// `refs/notes/{greengate,amont}-attest[-inputs]` are ORIGIN'S MIRROR, and origin is the
 /// only place an attestation can be revoked, so only a mirror that is
 /// origin's ref right now — or a repository with no origin at all, which is
 /// for fixtures and local use — is judged.
@@ -131,12 +131,20 @@ fn adopt(root: &Path, notes_ref: &str, tmp: &str, old: Option<&str>) -> Mirror {
     }
 }
 
-/// Bring both mirrors in line with origin: one fetch of both refs into
+/// Bring both mirrors of the LEGACY names in line with origin: one fetch of both refs into
 /// throwaways and, when that fails without timing out, one `ls-remote` to
 /// tell "origin has no such ref" from "origin did not answer" — then, if some
 /// refs exist, one more fetch of those. A silent origin costs one call (15 s
 /// at most), a dead one two (30 s), the worst case three (45 s).
 pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
+    sync_mirrors_of(root, loud, &LEGACY)
+}
+
+/// [`sync_mirrors`] for one name set's two refs. A verifier syncs each set on
+/// its own, so a set origin does not have (the old one after the census, the
+/// new one before the writers switch) is `Deleted`, which judges nothing and
+/// changes no verdict, never `Unreachable`.
+pub fn sync_mirrors_of(root: &Path, loud: &mut Vec<String>, names: &Names) -> (Mirror, Mirror) {
     if !git::succeeds_in(root, &["remote", "get-url", "origin"]) {
         return (Mirror::NoOrigin, Mirror::NoOrigin);
     }
@@ -149,7 +157,7 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
     // Known limits: a remove that fails leaves the fetch to fail and read as
     // unreachable (safe: nothing judged); a killed fetch's lock with no ref
     // beside it is not swept, only replaced when its pid comes round again.
-    for r in [NOTES_REF, INPUTS_REF] {
+    for r in [names.notes_ref, names.inputs_ref] {
         let _ = git::succeeds_in(root, &["update-ref", "-d", &tmp(r)]);
         if let Some(lock) = git::stdout_in(
             root,
@@ -161,16 +169,26 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
     }
     let old_main = git::stdout_in(
         root,
-        &["rev-parse", "--verify", "--quiet", &full(NOTES_REF)],
+        &["rev-parse", "--verify", "--quiet", &full(names.notes_ref)],
     );
     let old_inputs = git::stdout_in(
         root,
-        &["rev-parse", "--verify", "--quiet", &full(INPUTS_REF)],
+        &["rev-parse", "--verify", "--quiet", &full(names.inputs_ref)],
     );
     let adopt_both = || {
         (
-            adopt(root, NOTES_REF, &tmp(NOTES_REF), old_main.as_deref()),
-            adopt(root, INPUTS_REF, &tmp(INPUTS_REF), old_inputs.as_deref()),
+            adopt(
+                root,
+                names.notes_ref,
+                &tmp(names.notes_ref),
+                old_main.as_deref(),
+            ),
+            adopt(
+                root,
+                names.inputs_ref,
+                &tmp(names.inputs_ref),
+                old_inputs.as_deref(),
+            ),
         )
     };
     let states = match git::remote(
@@ -179,8 +197,8 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
             "fetch",
             "--quiet",
             "origin",
-            &spec(NOTES_REF),
-            &spec(INPUTS_REF),
+            &spec(names.notes_ref),
+            &spec(names.inputs_ref),
         ],
     ) {
         git::Remote::Done(0, _) => adopt_both(),
@@ -192,8 +210,8 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
                 "ls-remote",
                 "--exit-code",
                 "origin",
-                &full(NOTES_REF),
-                &full(INPUTS_REF),
+                &full(names.notes_ref),
+                &full(names.inputs_ref),
             ],
         ) {
             git::Remote::Done(0, listing) => {
@@ -203,13 +221,13 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
                         .lines()
                         .any(|l| l.split_whitespace().nth(1) == Some(f.as_str()))
                 };
-                let (has_main, has_inputs) = (listed(NOTES_REF), listed(INPUTS_REF));
+                let (has_main, has_inputs) = (listed(names.notes_ref), listed(names.inputs_ref));
                 let mut want = Vec::new();
                 if has_main {
-                    want.push(spec(NOTES_REF));
+                    want.push(spec(names.notes_ref));
                 }
                 if has_inputs {
-                    want.push(spec(INPUTS_REF));
+                    want.push(spec(names.inputs_ref));
                 }
                 let fetched = if want.is_empty() {
                     None
@@ -228,19 +246,19 @@ pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
                         _ => Mirror::Unreachable,
                     }
                 };
-                let m = one(has_main, NOTES_REF, old_main.as_deref(), loud);
-                let i = one(has_inputs, INPUTS_REF, old_inputs.as_deref(), loud);
+                let m = one(has_main, names.notes_ref, old_main.as_deref(), loud);
+                let i = one(has_inputs, names.inputs_ref, old_inputs.as_deref(), loud);
                 (m, i)
             }
             git::Remote::Done(2, _) => (
-                drop_mirror(root, loud, NOTES_REF),
-                drop_mirror(root, loud, INPUTS_REF),
+                drop_mirror(root, loud, names.notes_ref),
+                drop_mirror(root, loud, names.inputs_ref),
             ),
             git::Remote::TimedOut => (Mirror::TimedOut, Mirror::TimedOut),
             _ => (Mirror::Unreachable, Mirror::Unreachable),
         },
     };
-    for r in [NOTES_REF, INPUTS_REF] {
+    for r in [names.notes_ref, names.inputs_ref] {
         let _ = git::succeeds_in(root, &["update-ref", "-d", &tmp(r)]);
     }
     states

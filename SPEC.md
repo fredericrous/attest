@@ -17,6 +17,53 @@ aspirational: renaming them would orphan every note already signed, every
 already deployed — to make a string prettier. Read `amont-` as a version
 prefix that happens to be a word.
 
+## Names: `greengate-attest` and the older `amont-attest`
+
+Two complete name sets exist (decisions ADR-0068, which replaces the "frozen
+forever" reading above):
+
+| | LEGACY (written today) | GREEN (verified now, written from the writer switch) |
+|---|---|---|
+| format header | `amont-attest-v2` | `greengate-attest-v2` |
+| notes ref | `refs/notes/amont-attest` | `refs/notes/greengate-attest` |
+| inputs ref | `refs/notes/amont-attest-inputs` | `refs/notes/greengate-attest-inputs` |
+| SSH namespace (`-n`) | `amont-attest` | `greengate-attest` |
+| input-key domain | `amont-attest-input` | `greengate-attest-input` |
+| canonical-key domain | `amont-attest-canon` | `greengate-attest-canon` |
+| producer line | `amont <producer>` | `greengate <producer>` |
+
+Everything in this document that names an `amont-attest` string describes the
+LEGACY set; read it as "the set the note was written under".
+
+- **Reading order.** A verifier reads the GREEN ref first, and the LEGACY ref
+  only for an object (a tree, a commit, an input-fingerprint key, a canonical
+  key) the GREEN refs hold no note for. A note that exists but does not verify
+  does not send the verifier to the other ref. Both refs are fetched, each name
+  set on its own: a set origin lacks is `absent`, which judges nothing from it
+  and changes no verdict from the other.
+- **A note is read whole under one name.** Its header decides: a
+  `greengate-attest-v2` block is checked with `-n greengate-attest` and the
+  GREEN domains, an `amont-attest-v2` block with the LEGACY ones, never mixed.
+  The inputs ref pairs the same way: a note read from the GREEN notes ref pairs
+  only with the GREEN inputs ref and key domains, a LEGACY one only with the
+  LEGACY pair, so an old signature cannot be replayed as a new one, nor the
+  reverse. A block whose header names the other set than the ref it was found
+  in is refused ("is not `<header>`").
+- **Local mirrors** (`refs/notes/attest-local/…`) follow the same pairing and
+  order.
+- **What is printed.** A verification that checked a signature prints the
+  namespace it verified under: `attest: verified under greengate-attest` or
+  `verified under amont-attest` (stderr; in the trail under `explain`). The
+  action reports the GREEN refs' state as `notes` and `inputs_notes`, the
+  LEGACY refs' as `legacy_notes` and `legacy_inputs_notes`.
+- **The window.** Writers still write the LEGACY set; they switch to GREEN in a
+  later release (Phase 4 of the plan). From the day that release is installed,
+  both sets verify for 30 days (ADR-0068); after it a census removes the LEGACY
+  reads, the `amont-attest` signer namespaces and the LEGACY refs on every
+  remote. In this release the Rust constants (`format::FORMAT`, `NOTES_REF`,
+  `INPUTS_REF`, `NAMESPACE`) still equal `format::LEGACY`, so a dependent that
+  signs with them keeps writing LEGACY; `format::GREEN` holds the new names.
+
 ## The note
 
 One note per attested object, in `refs/notes/amont-attest`. A note holds one
@@ -450,7 +497,9 @@ Origin is the only place an attestation can be revoked — by deleting or
 rewriting its notes refs — so a verifier treats
 `refs/notes/amont-attest` and `refs/notes/amont-attest-inputs` in the
 repository it runs in as **origin's mirror**, never as a store of its own
-(1.4.0). It fetches both refs in one call, and:
+(1.4.0); the `greengate-attest` pair (see "Names") is mirrored the same way.
+It syncs each name set on its own, the GREEN pair first and the LEGACY pair
+second, each pair fetched in one call; below, "the refs" are one pair's, and:
 
 | outcome | `notes=` | the local ref |
 |---|---|---|
@@ -494,6 +543,11 @@ the verifier's own: a verifier that waits for a password or a dead host has
 broken "exit 0" as surely as a crash. A silent origin costs one call, at
 most 15 s; one that fails fast, two, at most 30 s; the worst case, an origin
 that answers `ls-remote` but stalls the second fetch, three, at most 45 s.
+These are the costs of ONE name set. A second set is synced only when the first
+got an answer: an origin that did not answer (`unreachable` or timed out, for
+both refs of the first set) is not asked again, so a silent origin still costs
+one call and a dead one two, in total; an origin that answers costs up to twice
+the figures above (one pair per set). A set origin does not have is `absent`.
 
 **Unpushed blocks** — written by a producer that did not push, such as
 `sign.sh --no-push` — live in `refs/notes/attest-local/amont-attest` and

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::format::is_oid;
+use crate::format::{is_oid, Names, LEGACY};
 use crate::git;
 use crate::spec::{implicit_inputs, Spec};
 
@@ -89,15 +89,26 @@ pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Result<S
     hash(root, &listing)
 }
 
-/// The bytes a fingerprint key is hashed from.
+/// The bytes a fingerprint key is hashed from, under the LEGACY names.
 pub fn key_preimage(gate: &str, fp: &str) -> String {
-    format!("amont-attest-input {gate} {fp}\n")
+    key_preimage_in(&LEGACY, gate, fp)
 }
 
-/// The synthetic note key for (gate, fingerprint): an oid that is not an
-/// object, which `git notes` accepts as a key all the same.
+/// The bytes a fingerprint key is hashed from, under `names`' domain.
+pub fn key_preimage_in(names: &Names, gate: &str, fp: &str) -> String {
+    format!("{} {gate} {fp}\n", names.input_domain)
+}
+
+/// The synthetic note key for (gate, fingerprint) under the LEGACY names: an
+/// oid that is not an object, which `git notes` accepts as a key all the same.
 pub fn key(root: &Path, gate: &str, fp: &str) -> Result<String, Error> {
-    hash(root, key_preimage(gate, fp).as_bytes())
+    key_in(root, &LEGACY, gate, fp)
+}
+
+/// The same key under `names`: each name set files its inputs under its own
+/// keys, in its own inputs ref.
+pub fn key_in(root: &Path, names: &Names, gate: &str, fp: &str) -> Result<String, Error> {
+    hash(root, key_preimage_in(names, gate, fp).as_bytes())
 }
 
 /// The canonical text of an `ls-tree -r --full-tree` listing (paths quoted by
@@ -150,14 +161,25 @@ pub fn canon(root: &Path, tree: &str) -> Result<String, Error> {
     hash(root, text.as_bytes())
 }
 
-/// The bytes the canonical key is hashed from.
+/// The bytes the canonical key is hashed from, under the LEGACY names.
 pub fn canon_key_preimage(canon: &str) -> String {
-    format!("amont-attest-canon {canon}\n")
+    canon_key_preimage_in(&LEGACY, canon)
 }
 
-/// The synthetic note key for a canonical fingerprint, in the inputs ref.
+/// The bytes the canonical key is hashed from, under `names`' domain.
+pub fn canon_key_preimage_in(names: &Names, canon: &str) -> String {
+    format!("{} {canon}\n", names.canon_domain)
+}
+
+/// The synthetic note key for a canonical fingerprint, in the (LEGACY) inputs
+/// ref.
 pub fn canon_key(root: &Path, canon: &str) -> Result<String, Error> {
-    hash(root, canon_key_preimage(canon).as_bytes())
+    canon_key_in(root, &LEGACY, canon)
+}
+
+/// The same key under `names`.
+pub fn canon_key_in(root: &Path, names: &Names, canon: &str) -> Result<String, Error> {
+    hash(root, canon_key_preimage_in(names, canon).as_bytes())
 }
 
 /// The optional paths `gate` declares that `tree` does not hold: their

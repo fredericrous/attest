@@ -69,9 +69,9 @@ make_repo() { # dir principal keyfile [principal2 keyfile2]
     git -C "$dir" config core.autocrlf false
     git -C "$dir" config user.email signer@example.org
     git -C "$dir" config user.name Signer
-    printf '%s namespaces="amont-attest" %s\n' "$principal" "$(cat "$keyfile.pub")" \
+    printf '%s namespaces="%s" %s\n' "$principal" "${SIGNERS_NS:-amont-attest,greengate-attest}" "$(cat "$keyfile.pub")" \
         > "$dir/.github/allowed_signers"
-    [ $# -lt 5 ] || printf '%s namespaces="amont-attest" %s\n' "$4" "$(cat "$5.pub")" \
+    [ $# -lt 5 ] || printf '%s namespaces="%s" %s\n' "$4" "${SIGNERS_NS:-amont-attest,greengate-attest}" "$(cat "$5.pub")" \
         >> "$dir/.github/allowed_signers"
     echo content > "$dir/file.txt"
     git -C "$dir" add -A
@@ -94,11 +94,26 @@ payload_for() { # dir gates platform [format] [inputs "gate=fp ..."]
 # signing the lines without it produces a signature that is valid over bytes
 # no verifier will ever reconstruct.
 sign_block() { # dir payload keyfile
-    printf '%s\n' "$2" > "$1/.p"
-    rm -f "$1/.p.sig"
-    ssh-keygen -Y sign -n amont-attest -f "$3" "$1/.p" > /dev/null 2>&1
-    printf '%s\n\n%s' "$2" "$(cat "$1/.p.sig")"
-    rm -f "$1/.p" "$1/.p.sig"
+    sign_block_ns amont-attest "$1" "$2" "$3"
+}
+
+# The same under any SSH namespace (the greengate-attest name set, 1.9.0).
+sign_block_ns() { # ns dir payload keyfile
+    printf '%s\n' "$3" > "$2/.p"
+    rm -f "$2/.p.sig"
+    ssh-keygen -Y sign -n "$1" -f "$4" "$2/.p" > /dev/null 2>&1
+    printf '%s\n\n%s' "$3" "$(cat "$2/.p.sig")"
+    rm -f "$2/.p" "$2/.p.sig"
+}
+
+# A block signed under `ns` as the note on `target` (default the HEAD tree) in
+# any notes ref: the way a fixture mixes the two name sets, or breaks the
+# pairing on purpose.
+note_signed() { # ref ns dir payload keyfile [target]
+    local ref=$1 ns=$2 dir=$3 payload=$4 keyfile=$5 target=${6:-}
+    [ -n "$target" ] || target=$(git -C "$dir" rev-parse 'HEAD^{tree}')
+    git -C "$dir" notes --ref "$ref" add -f \
+        -m "$(sign_block_ns "$ns" "$dir" "$payload" "$keyfile")" "$target" 2> /dev/null
 }
 
 # A signed block as THE note on the HEAD tree (or `target`), replacing any.
@@ -238,8 +253,8 @@ fp_of() { # dir gate [tree]
 }
 
 # The synthetic note key for (gate, fingerprint).
-input_key() { # dir gate fp
-    printf 'amont-attest-input %s %s\n' "$2" "$3" | git -C "$1" hash-object --stdin
+input_key() { # dir gate fp [domain]
+    printf '%s %s %s\n' "${4:-amont-attest-input}" "$2" "$3" | git -C "$1" hash-object --stdin
 }
 
 # A signed block APPENDED under K(gate, fp) in the inputs ref.

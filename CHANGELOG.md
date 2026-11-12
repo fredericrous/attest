@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Verifiers read both note names** (decisions ADR-0068, plan
+  greengate-signs-notes-under-green-names, Phase 1). `format::LEGACY` and
+  `format::GREEN` hold the two name sets (header, notes and inputs refs, SSH
+  namespace, fingerprint domains, producer word). `evaluate`, `verify.sh` and
+  `git-attest covered` read `refs/notes/greengate-attest[-inputs]` first and
+  `refs/notes/amont-attest[-inputs]` only for an object the first holds no note
+  for; a note is checked whole under the namespace and domains of its header,
+  never mixed. Every verification prints `verified under <namespace>`.
+  `fingerprint::key_in` / `canon_key_in` take the name set; `key` and
+  `canon_key` keep their signatures and mean LEGACY. The constants `FORMAT`,
+  `NOTES_REF`, `INPUTS_REF` and `NAMESPACE` are unchanged, and the writers
+  (`sign`, `produce`, `sign.sh`) still write the LEGACY names. `Verdict` gains
+  `legacy_notes` and `verified_under`; `notes` now reports the GREEN refs, and
+  the action adds `legacy_notes` and `legacy_inputs_notes`. See SPEC.md,
+  "Names".
+
 ## 1.8.0
 
 - **Platform-bound signer principals.** A principal ending in

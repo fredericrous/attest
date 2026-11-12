@@ -501,9 +501,11 @@ explain_in() { # dir [flags...]
     # shellcheck disable=SC2046,SC2086  # the command line word-splits on purpose
     ERR=$(cd "$dir" && set -- $(explain_impl) "$@" && "$@" 2>&1 > /dev/null < /dev/null)
 }
-gha_in() { # dir [flags...] -> the notes= and inputs_notes= lines, joined
+# The producer still writes the LEGACY names (refs/notes/amont-attest), so the
+# state these cases assert is the legacy_notes= pair, shown as notes=.
+gha_in() { # dir [flags...] -> the legacy_notes= and legacy_inputs_notes= lines, joined
     run_impl "$1" --github-output "${@:2}"
-    printf '%s' "$GOT" | tr ' ' '\n' | grep -E '^(inputs_)?notes=' | tr '\n' ' ' | sed 's/ $//'
+    printf '%s' "$GOT" | tr ' ' '\n' | grep -E '^legacy_(inputs_)?notes=' | sed 's/^legacy_//' | tr '\n' ' ' | sed 's/ $//'
 }
 has_ref() { git -C "$1" rev-parse --verify --quiet "$2" > /dev/null 2>&1; }
 
@@ -557,9 +559,11 @@ git -C "$R" remote set-url origin "file:///nonexistent/attest-origin.git"
 check "an unreachable origin: the mirror is not judged" "" "$R"
 assert_eq "...notes says so" "$(gha_in "$R")" "notes=unreachable inputs_notes=unreachable"
 explain_in "$R"
-want="attest: cannot fetch refs/notes/amont-attest from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything
+want="attest: cannot fetch refs/notes/greengate-attest from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything
+attest: cannot fetch refs/notes/greengate-attest-inputs from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything
+attest: cannot fetch refs/notes/amont-attest from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything
 attest: cannot fetch refs/notes/amont-attest-inputs from origin (no credentials? persist-credentials: false?); local mirror not judged, running everything"
-assert_eq "...with the exact reasons first" "$(printf '%s\n' "$ERR" | head -2)" "$want"
+assert_eq "...with the exact reasons first, one pair per name set" "$(printf '%s\n' "$ERR" | head -4)" "$want"
 if has_ref "$R" refs/notes/amont-attest; then ok "...and the mirror is kept for when origin answers"; else fail "...and the mirror is kept" "deleted"; fi
 
 # An unpushed block beside an ignored one says how to include it.

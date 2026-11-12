@@ -32,9 +32,9 @@
 #
 # `--include-local` also reads refs/notes/attest-local/*: blocks signed with
 # `sign.sh --no-push` that never reached origin, so origin cannot revoke them.
-# refs/notes/amont-attest[-inputs] themselves are ORIGIN'S MIRROR: fetched,
+# refs/notes/{greengate,amont}-attest[-inputs] are ORIGIN'S MIRROR: fetched,
 # deleted when origin no longer has them, and not read at all when origin is
-# configured but cannot be reached.
+# configured but cannot be reached. The greengate ref wins; amont is the fallback.
 #
 # Depends on `git` and `ssh-keygen` only. See SPEC.md for the format.
 #
@@ -42,12 +42,35 @@
 # are word-split on purpose; a name like `pre-push-*` next to a file named
 # `pre-push-cargo-test` would otherwise become that file's name and cover a
 # gate nobody signed.
+# canon_key (in the shared canon block) is the legacy-domain key sign.sh uses;
+# this script asks canon_key_of for the name set in force.
+# shellcheck disable=SC2329
 set -uf
 
-FORMAT=amont-attest-v2
-NOTES_REF=amont-attest
-INPUTS_REF=amont-attest-inputs
-NAMESPACE=amont-attest
+# Two complete name sets (SPEC.md, "Names"), read in this order: a note is read
+# WHOLE under one of them, so its header, SSH namespace, inputs ref and
+# fingerprint domains never mix. Phase 1 of the greengate-names plan: writers
+# (sign/sign.sh) still write the legacy set.
+SETS="green legacy"
+use_set() { # green | legacy
+    case $1 in
+        green)
+            FORMAT=greengate-attest-v2
+            NOTES_REF=greengate-attest
+            INPUTS_REF=greengate-attest-inputs
+            NAMESPACE=greengate-attest
+            INPUT_DOMAIN=greengate-attest-input
+            CANON_DOMAIN=greengate-attest-canon ;;
+        legacy)
+            FORMAT=amont-attest-v2
+            NOTES_REF=amont-attest
+            INPUTS_REF=amont-attest-inputs
+            NAMESPACE=amont-attest
+            INPUT_DOMAIN=amont-attest-input
+            CANON_DOMAIN=amont-attest-canon ;;
+    esac
+}
+use_set legacy
 
 signers=; principal=; platform=; anywhere=; quiet=; mode=plain; include_local=
 
@@ -134,8 +157,10 @@ to_json() {
 #
 #   covered=pre-push-cargo-test        (legacy; a SUBSTRING match downstream)
 #   gates=["pre-push-cargo-test"]      (use this one)
-#   notes=fetched                      (refs/notes/amont-attest)
-#   inputs_notes=absent                (refs/notes/amont-attest-inputs)
+#   notes=fetched                      (refs/notes/greengate-attest)
+#   inputs_notes=absent                (refs/notes/greengate-attest-inputs)
+#   legacy_notes=fetched               (refs/notes/amont-attest)
+#   legacy_inputs_notes=absent         (refs/notes/amont-attest-inputs)
 #
 # each one of fetched, absent, unreachable, unwritable, undeletable, no-origin — or empty
 # when the verifier stopped before reading any notes.
@@ -147,11 +172,12 @@ emit() {
         plain) [ -z "$1" ] || printf '%s\n' "$1" ;;
         json)  to_json "$1" ;;
         gha)   printf 'covered=%s\n' "$1"; printf 'gates=%s\n' "$(to_json "$1")"
-               printf 'notes=%s\n' "$st_main"; printf 'inputs_notes=%s\n' "$st_inputs" ;;
+               printf 'notes=%s\n' "$st_main_green"; printf 'inputs_notes=%s\n' "$st_inputs_green"
+               printf 'legacy_notes=%s\n' "$st_main_legacy"; printf 'legacy_inputs_notes=%s\n' "$st_inputs_legacy" ;;
     esac
 }
 
-st_main=; st_inputs=
+st_main=; st_inputs=; st_main_green=; st_inputs_green=; st_main_legacy=; st_inputs_legacy=
 uncovered() { note "$1"; emit ""; exit 0; }
 
 command -v git        > /dev/null 2>&1 || uncovered "no git on PATH"
@@ -175,8 +201,8 @@ fi
 
 # The notes refs, from origin. SPEC.md, "Which refs are read".
 #
-# refs/notes/amont-attest and refs/notes/amont-attest-inputs are ORIGIN'S
-# MIRROR, and origin is the only place an attestation can be revoked. So:
+# refs/notes/{greengate,amont}-attest and their -inputs refs are ORIGIN'S
+# MIRROR (each name set is synced on its own: one origin lacks is `absent`), and origin is the only place an attestation can be revoked. So:
 #
 #   fetched      the fetch succeeded; the mirror is origin's ref, judged
 #   absent       origin answered and has no such ref: the local mirror is
@@ -339,7 +365,7 @@ sync_mirrors() {
     git update-ref -d "$(tmp_ref "$INPUTS_REF")" > /dev/null 2>&1
     return 0
 }
-sync_mirrors
+# (sync_mirrors runs once per name set, below.)
 
 # Say what became of each ref, in a fixed order (both implementations do).
 say_state() { # ref state
@@ -361,24 +387,48 @@ say_lock() { # ref
     [ -e "$path" ] && note "a git that was killed left a lock on refs/notes/$1; if no git is running: rm $path"
     return 0
 }
-say_state "$NOTES_REF" "$st_main"; say_lock "$NOTES_REF"
-say_state "$INPUTS_REF" "$st_inputs"; say_lock "$INPUTS_REF"
-if [ -z "$include_local" ]; then
-    for r in "$NOTES_REF" "$INPUTS_REF"; do
-        [ -n "$(git notes --ref "attest-local/$r" list 2> /dev/null | head -1)" ] &&
-            note "refs/notes/attest-local/$r holds unpushed blocks, ignored without --include-local"
-    done
-fi
-
-# The refs each lookup reads, in order: the mirror, then the unpushed blocks.
+# The refs each lookup reads, per name set, in order: the mirror, then the
+# unpushed blocks. A local ref pairs with its own set's names only.
 judged() { case $1 in fetched | no-origin) return 0 ;; *) return 1 ;; esac; }
-refs_main=; refs_inputs=
-judged "$st_main" && refs_main=$NOTES_REF
-judged "$st_inputs" && refs_inputs=$INPUTS_REF
-if [ -n "$include_local" ]; then
-    refs_main="$refs_main attest-local/$NOTES_REF"
-    refs_inputs="$refs_inputs attest-local/$INPUTS_REF"
-fi
+refs_main_green=; refs_inputs_green=; refs_main_legacy=; refs_inputs_legacy=
+for s in $SETS; do
+    use_set "$s"
+    # An origin that did not answer for the first set will not for the second:
+    # asking again would only double the wait.
+    if [ "$s" = legacy ] && [ "$st_main_green" = unreachable ] && [ "$st_inputs_green" = unreachable ]; then
+        st_main=unreachable; st_inputs=unreachable
+    else
+        timed_out=
+        sync_mirrors
+    fi
+    say_state "$NOTES_REF" "$st_main"; say_lock "$NOTES_REF"
+    say_state "$INPUTS_REF" "$st_inputs"; say_lock "$INPUTS_REF"
+    if [ -z "$include_local" ]; then
+        for r in "$NOTES_REF" "$INPUTS_REF"; do
+            [ -n "$(git notes --ref "attest-local/$r" list 2> /dev/null | head -1)" ] &&
+                note "refs/notes/attest-local/$r holds unpushed blocks, ignored without --include-local"
+        done
+    fi
+    rm_=; ri_=
+    judged "$st_main" && rm_=$NOTES_REF
+    judged "$st_inputs" && ri_=$INPUTS_REF
+    if [ -n "$include_local" ]; then
+        rm_="$rm_ attest-local/$NOTES_REF"
+        ri_="$ri_ attest-local/$INPUTS_REF"
+    fi
+    case $s in
+        green) st_main_green=$st_main; st_inputs_green=$st_inputs; refs_main_green=$rm_; refs_inputs_green=$ri_ ;;
+        legacy) st_main_legacy=$st_main; st_inputs_legacy=$st_inputs; refs_main_legacy=$rm_; refs_inputs_legacy=$ri_ ;;
+    esac
+done
+# The refs of one set, into REFS_MAIN and REFS_INPUTS, with its names in force.
+use_refs() { # green | legacy
+    use_set "$1"
+    case $1 in
+        green) REFS_MAIN=$refs_main_green; REFS_INPUTS=$refs_inputs_green ;;
+        legacy) REFS_MAIN=$refs_main_legacy; REFS_INPUTS=$refs_inputs_legacy ;;
+    esac
+}
 
 head_tree=$(git rev-parse 'HEAD^{tree}' 2> /dev/null) || uncovered "cannot resolve HEAD^{tree}"
 
@@ -729,7 +779,10 @@ input_fp() {
 }
 
 # The synthetic note key for (gate, fingerprint).
-input_key() { printf 'amont-attest-input %s %s\n' "$1" "$2" | git hash-object --stdin 2> /dev/null; }
+input_key() { printf '%s %s %s\n' "$INPUT_DOMAIN" "$1" "$2" | git hash-object --stdin 2> /dev/null; }
+# The same for the canonical fingerprint $1, under the name set in force (the
+# canon-block's own canon_key is the legacy one, kept for sign.sh).
+canon_key_of() { printf '%s %s\n' "$CANON_DOMAIN" "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
 
 # The checked-out tree's canonical fingerprint, memoised in "$tmp/canon.here":
 # the oid, or an empty file when the route is unavailable here (the repository
@@ -798,15 +851,17 @@ kept_gates() {
 # Accumulates into $covered; a note seen before is skipped by its oid, a
 # block seen before by its bytes (its verdict depends only on its content and
 # HEAD, whichever note it appears in).
-covered=; seen=; seen_blocks=; tried=; verifications=0; exhausted=
+covered=; seen=; seen_blocks=; verified_under=; tried=; verifications=0; exhausted=
 judge_note() {
     local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here every_principal bound_refusal candidate bound
+    # Returns 1 only when the ref holds no note for the object: the caller
+    # reads the next name set then, and only then.
+    note_oid=$(git notes --ref "$nref" list "$object" 2> /dev/null) || return 1
     [ -z "$exhausted" ] || return 0
-    note_oid=$(git notes --ref "$nref" list "$object" 2> /dev/null) || return 0
     note_oid=${note_oid%% *}
     in_list "$note_oid" "$seen" && return 0
     seen="$seen $note_oid"
-    body=$(git notes --ref "$nref" show "$object" 2> /dev/null) || return 0
+    body=$(git notes --ref "$nref" show "$object" 2> /dev/null) || return 1
     tried=yes
 
     # LF only. Checked by the shell itself, before any tool sees the note:
@@ -838,7 +893,7 @@ judge_note() {
         printf '%s\n' "$body" | sed -n "${ss},${se}p" > "$sig_file"
 
         [ "$(printf '%s\n' "$payload" | sed -n 1p)" = "$FORMAT" ] || {
-            note "note on $where is not $FORMAT (a newer producer wrote it; running the tests)"
+            note "note on $where is not $FORMAT (a newer producer, or the other name set, wrote it; running the tests)"
             continue
         }
 
@@ -907,6 +962,12 @@ PRINCIPALS
             note "$bound_refusal"
             continue
         fi
+        # Only a block whose signature verified AND whose principal may sign it
+        # (the Rust path's `sign::verify` is both): the rollout counts these.
+        case " $verified_under " in
+            *" $NAMESPACE "*) ;;
+            *) verified_under="$verified_under $NAMESPACE" ;;
+        esac
 
         # The uniform rule, per gate: the tree is the checked-out tree, or the
         # block's canonical tree is the checked-out one's, or the block's
@@ -964,8 +1025,14 @@ label() { case $1 in attest-local/*) printf '%s (unpushed)' "$2" ;; *) printf '%
 # a PR checkout is a merge commit whose second parent is the pushed tip.
 for candidate in "$head_tree" HEAD HEAD^2; do
     object=$(git rev-parse --verify --quiet "$candidate" 2> /dev/null) || continue
-    for r in $refs_main; do
-        judge_note "$r" "$object" "$(label "$r" "$candidate")"
+    # Per object, the greengate ref first; the amont ref only when the
+    # greengate refs hold no note for it (a note is read whole under one name).
+    for s in $SETS; do
+        use_refs "$s"; found=
+        for r in $REFS_MAIN; do
+            judge_note "$r" "$object" "$(label "$r" "$candidate")" && found=1
+        done
+        [ -z "$found" ] || break
     done
 done
 
@@ -981,10 +1048,15 @@ if [ -n "$spec_ok" ]; then
             note "gate $g: no fingerprint here (a declared path does not exist in this tree)"
             continue
         fi
-        k=$(input_key "$g" "$fp") || continue
-        [ -n "$k" ] || continue
-        for r in $refs_inputs; do
-            judge_note "$r" "$k" "$(label "$r" "input $g $(printf '%s' "$fp" | cut -c1-12)")"
+        for s in $SETS; do
+            use_refs "$s"
+            k=$(input_key "$g" "$fp") || continue
+            [ -n "$k" ] || continue
+            found=
+            for r in $REFS_INPUTS; do
+                judge_note "$r" "$k" "$(label "$r" "input $g $(printf '%s' "$fp" | cut -c1-12)")" && found=1
+            done
+            [ -z "$found" ] || break
         done
     done < "$tmp/spec.gates"
 fi
@@ -994,16 +1066,21 @@ fi
 if [ -z "$exhausted" ]; then
     c=$(canon_here)
     if [ -n "$c" ]; then
-        k=$(canon_key "$c")
-        if [ -n "$k" ]; then
-            for r in $refs_inputs; do
-                judge_note "$r" "$k" "$(label "$r" "canon $(printf '%s' "$c" | cut -c1-12)")"
+        for s in $SETS; do
+            use_refs "$s"
+            k=$(canon_key_of "$c")
+            [ -n "$k" ] || continue
+            found=
+            for r in $REFS_INPUTS; do
+                judge_note "$r" "$k" "$(label "$r" "canon $(printf '%s' "$c" | cut -c1-12)")" && found=1
             done
-            [ -z "$canon_used" ] || note "canonical tree $c, key $k"
-        fi
+            [ -z "$found" ] || { [ -z "$canon_used" ] || note "canonical tree $c, key $k"; break; }
+        done
     fi
 fi
 
 [ -n "$tried" ] || note "no attestation found for tree $head_tree"
+# The name each verification went through; the rollout counts these lines.
+for ns in $verified_under; do note_always "verified under $ns"; done
 emit "$covered"
 exit 0

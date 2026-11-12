@@ -47,14 +47,18 @@ git-attest — what a signed attestation covers for the tree checked out here
                     `sign.sh --no-push` that never reached origin, so origin
                     cannot revoke them. Off by default.
   --json            print a JSON array instead of a space-separated list
-  --github-output   print `covered=`, `gates=`, `notes=` and `inputs_notes=`
-                    lines ready to append to $GITHUB_OUTPUT
+  --github-output   print `covered=`, `gates=`, `notes=`, `inputs_notes=`,
+                    `legacy_notes=` and `legacy_inputs_notes=` lines ready
+                    to append to $GITHUB_OUTPUT
 
   A committed .github/attest-inputs (or .forgejo/) names the paths each gate
   reads; a gate is then also covered by an attestation of any tree whose
-  declared inputs are identical. refs/notes/amont-attest[-inputs] are
-  origin's mirror: fetched, deleted when origin no longer has them, and not
-  read when origin is configured but cannot be reached.
+  declared inputs are identical. refs/notes/greengate-attest[-inputs] and
+  the older refs/notes/amont-attest[-inputs] are origin's mirror: fetched,
+  deleted when origin no longer has them, and not read when origin is
+  configured but cannot be reached. The greengate ref is read first; the
+  amont one only for an object it has no note for. Every verification prints
+  the name it went through (`verified under greengate-attest`).
 ";
 
 #[derive(Default, Debug, PartialEq)]
@@ -242,6 +246,8 @@ fn run(args: &[String]) -> u8 {
             gates,
             trail,
             notes,
+            legacy_notes,
+            verified_under,
             loud,
             warnings,
         } = verdict;
@@ -259,6 +265,11 @@ fn run(args: &[String]) -> u8 {
             for line in &warnings {
                 eprintln!("attest: {line}");
             }
+            // The name each verification went through: the rollout counts
+            // these lines, so they are not an `explain` extra.
+            for ns in &verified_under {
+                eprintln!("attest: verified under {ns}");
+            }
         }
         if gha {
             // Both forms. `covered` is the legacy string a downstream
@@ -269,6 +280,9 @@ fn run(args: &[String]) -> u8 {
             let (m, i) = notes.map_or(("", ""), |(m, i)| (m.as_str(), i.as_str()));
             println!("notes={m}");
             println!("inputs_notes={i}");
+            let (m, i) = legacy_notes.map_or(("", ""), |(m, i)| (m.as_str(), i.as_str()));
+            println!("legacy_notes={m}");
+            println!("legacy_inputs_notes={i}");
         } else if json {
             println!("{}", as_json(&gates));
         } else if !gates.is_empty() {
@@ -289,6 +303,8 @@ fn run(args: &[String]) -> u8 {
                 "no allowed_signers found (.forgejo/ or .github/) at the repository root".into(),
             ],
             notes: None,
+            legacy_notes: None,
+            verified_under: Vec::new(),
             loud: Vec::new(),
             warnings: Vec::new(),
         });

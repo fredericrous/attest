@@ -13,13 +13,13 @@
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::fingerprint::{canon, canon_key, fingerprint, key};
+use crate::fingerprint::{canon, canon_key_in, fingerprint, key_in};
 use crate::format::{
-    canon_claim, field, input_fp, platform_matches, split_blocks, FORMAT, INPUTS_REF, LOCAL_PREFIX,
-    MAX_BLOCKS, NAMESPACE, NOTES_REF,
+    canon_claim, field, input_fp, platform_matches, split_blocks, Names, LOCAL_PREFIX, MAX_BLOCKS,
+    READ_ORDER,
 };
 use crate::git;
-use crate::notes::{sync_mirrors, Mirror};
+use crate::notes::{sync_mirrors_of, Mirror};
 use crate::spec::{plan_exempt, AtError, PlanExempt, Spec, DEPRECATED_OPT_OUT, SPEC_PATHS};
 
 /// How many signatures one invocation verifies, over every candidate. A
@@ -39,9 +39,16 @@ pub struct Verdict {
     /// nothing is covered.
     pub gates: Vec<String>,
     pub trail: Vec<String>,
-    /// What became of `refs/notes/amont-attest` and `…-inputs`, in that
+    /// What became of `refs/notes/greengate-attest` and `…-inputs`, in that
     /// order; `None` when the verifier stopped before reading any notes.
     pub notes: Option<(Mirror, Mirror)>,
+    /// The same for `refs/notes/amont-attest` and `…-inputs`, the LEGACY
+    /// names that are read until the census.
+    pub legacy_notes: Option<(Mirror, Mirror)>,
+    /// The namespace of every name set a block verified under (`greengate-attest`,
+    /// `amont-attest`), first-appearance order. Shown even without `explain`:
+    /// it is the line the rollout counts.
+    pub verified_under: Vec<String>,
     /// Lines that report a change to the repository's refs. They are shown
     /// even without `explain`: data went away, and they say how to restore it.
     pub loud: Vec<String>,
@@ -57,6 +64,8 @@ impl Verdict {
             gates: Vec::new(),
             trail: vec![reason.into()],
             notes: None,
+            legacy_notes: None,
+            verified_under: Vec::new(),
             loud: Vec::new(),
             warnings: Vec::new(),
         }
@@ -188,6 +197,7 @@ struct Judge<'a> {
     trail: Vec<String>,
     seen_notes: Vec<String>,
     seen_blocks: Vec<u64>,
+    verified_under: Vec<String>,
     verifications: usize,
     exhausted: bool,
     tried: bool,
@@ -247,24 +257,28 @@ impl Judge<'_> {
         c
     }
 
-    /// Judge every block of the note on `object` in `notes_ref`.
-    fn judge(&mut self, notes_ref: &str, object: &str, at: &str) {
-        if self.exhausted {
-            return;
-        }
+    /// Judge every block of the note on `object` in `notes_ref`, which holds
+    /// notes of the `names` set and of no other: a block is checked under that
+    /// set's header, namespace and (through the key it was found by) domain.
+    /// Returns whether the ref has a note for `object` at all, judged now or
+    /// before: the caller reads the next name set only when it has none.
+    fn judge(&mut self, names: &Names, notes_ref: &str, object: &str, at: &str) -> bool {
         let Some(listing) =
             git::stdout_in(&self.root, &["notes", "--ref", notes_ref, "list", object])
         else {
-            return;
+            return false;
         };
+        if self.exhausted {
+            return true;
+        }
         let note_oid = listing.split_whitespace().next().unwrap_or("").to_string();
         if self.seen_notes.contains(&note_oid) {
-            return;
+            return true;
         }
         self.seen_notes.push(note_oid);
         let Some(body) = git::stdout_in(&self.root, &["notes", "--ref", notes_ref, "show", object])
         else {
-            return;
+            return false;
         };
         self.tried = true;
 
@@ -275,7 +289,7 @@ impl Judge<'_> {
                 &mut self.trail,
                 format!("note on {at} contains carriage returns; the format is LF-only"),
             );
-            return;
+            return true;
         }
 
         let (blocks, truncated) = split_blocks(&body);
@@ -290,7 +304,7 @@ impl Judge<'_> {
                 &mut self.trail,
                 format!("note on {at} carries no signature block"),
             );
-            return;
+            return true;
         }
         let several = blocks.len() > 1;
         for (i, block) in blocks.iter().enumerate() {
@@ -300,10 +314,13 @@ impl Judge<'_> {
                 at.to_string()
             };
             let payload = &block.payload;
-            if payload.split('\n').next() != Some(FORMAT) {
+            if payload.split('\n').next() != Some(names.format) {
                 push_reason(
                     &mut self.trail,
-                    format!("note on {where_} is not {FORMAT} — a newer producer wrote it"),
+                    format!(
+                        "note on {where_} is not {} — a newer producer, or the other name set, wrote it",
+                        names.format
+                    ),
                 );
                 continue;
             }
@@ -341,14 +358,14 @@ impl Judge<'_> {
                     format!("the budget of {MAX_VERIFICATIONS} signature verifications is spent; remaining candidates were not read"),
                 );
                 self.exhausted = true;
-                return;
+                return true;
             }
             self.verifications += 1;
             // Signature BEFORE anything the block's claims could buy it: the
             // `anywhere` list and the input fingerprints may only admit gates
             // from a block that actually verified.
             let signer = match crate::sign::verify(
-                NAMESPACE,
+                names.namespace,
                 payload,
                 &block.signature,
                 self.signers,
@@ -360,6 +377,7 @@ impl Judge<'_> {
                     continue;
                 }
             };
+            union(&mut self.verified_under, std::iter::once(names.namespace));
             // The uniform rule, per gate: the tree is the checked-out tree,
             // or the block's fingerprint for that gate is the one computed
             // here.
@@ -426,6 +444,7 @@ impl Judge<'_> {
             }
             push_reason(&mut self.trail, reason);
         }
+        true
     }
 }
 
@@ -496,40 +515,57 @@ pub fn evaluate(
             gates: Vec::new(),
             trail,
             notes: None,
+            legacy_notes: None,
+            verified_under: Vec::new(),
             loud,
             warnings: Vec::new(),
         };
     };
 
-    let (st_main, st_inputs) = sync_mirrors(&root, &mut loud);
-    let notes = Some((st_main, st_inputs));
-    for (r, st) in [(NOTES_REF, st_main), (INPUTS_REF, st_inputs)] {
-        if let Some(why) = state_reason(r, st) {
-            push_reason(&mut trail, why);
-        }
-        if let Some(why) = lock_reason(&root, r) {
-            push_reason(&mut trail, why);
-        }
+    // Each name set is synced on its own: a set origin does not have is
+    // `Deleted` (nothing judged, nothing lost), never "unreachable".
+    let mut states: Vec<(Names, Mirror, Mirror)> = Vec::new();
+    for names in READ_ORDER {
+        // An origin that did not answer for the first set will not for the
+        // second: asking again would only double the wait.
+        let (m, i) = match states.first() {
+            Some(&(_, m @ (Mirror::TimedOut | Mirror::Unreachable), i)) if i == m => (m, i),
+            _ => sync_mirrors_of(&root, &mut loud, &names),
+        };
+        states.push((names, m, i));
     }
-    if !include_local {
-        for r in [NOTES_REF, INPUTS_REF] {
-            let local = format!("refs/notes/{LOCAL_PREFIX}{r}");
-            // A ref that holds notes: `git notes remove` of the last one
-            // leaves the ref behind, and that is nothing to report.
-            if git::stdout_in(
-                &root,
-                &["notes", "--ref", &format!("{LOCAL_PREFIX}{r}"), "list"],
-            )
-            .is_some()
-            {
-                push_reason(
-                    &mut trail,
-                    format!("{local} holds unpushed blocks, ignored without --include-local"),
-                );
+    let notes = Some((states[0].1, states[0].2));
+    let legacy_notes = Some((states[1].1, states[1].2));
+    for (names, st_main, st_inputs) in &states {
+        for (r, st) in [(names.notes_ref, *st_main), (names.inputs_ref, *st_inputs)] {
+            if let Some(why) = state_reason(r, st) {
+                push_reason(&mut trail, why);
+            }
+            if let Some(why) = lock_reason(&root, r) {
+                push_reason(&mut trail, why);
+            }
+        }
+        if !include_local {
+            for r in [names.notes_ref, names.inputs_ref] {
+                let local = format!("refs/notes/{LOCAL_PREFIX}{r}");
+                // A ref that holds notes: `git notes remove` of the last one
+                // leaves the ref behind, and that is nothing to report.
+                if git::stdout_in(
+                    &root,
+                    &["notes", "--ref", &format!("{LOCAL_PREFIX}{r}"), "list"],
+                )
+                .is_some()
+                {
+                    push_reason(
+                        &mut trail,
+                        format!("{local} holds unpushed blocks, ignored without --include-local"),
+                    );
+                }
             }
         }
     }
-    // The refs each lookup reads, in order: the mirror, then the unpushed.
+    // The refs each lookup reads, per name set and in order: the mirror, then
+    // the unpushed. A local ref pairs with its own set's names only.
     let refs = |mirror: &str, st: Mirror| -> Vec<String> {
         let mut v = Vec::new();
         if st.judged() {
@@ -540,8 +576,10 @@ pub fn evaluate(
         }
         v
     };
-    let refs_main = refs(NOTES_REF, st_main);
-    let refs_inputs = refs(INPUTS_REF, st_inputs);
+    let sets: Vec<(Names, Vec<String>, Vec<String>)> = states
+        .iter()
+        .map(|(n, m, i)| (*n, refs(n.notes_ref, *m), refs(n.inputs_ref, *i)))
+        .collect();
 
     let Some(head_tree) = git::stdout_in(&root, &["rev-parse", "HEAD^{tree}"]) else {
         push_reason(
@@ -552,6 +590,8 @@ pub fn evaluate(
             gates: Vec::new(),
             trail,
             notes,
+            legacy_notes,
+            verified_under: Vec::new(),
             loud,
             warnings: Vec::new(),
         };
@@ -574,6 +614,7 @@ pub fn evaluate(
         trail,
         seen_notes: Vec::new(),
         seen_blocks: Vec::new(),
+        verified_under: Vec::new(),
         verifications: 0,
         exhausted: false,
         tried: false,
@@ -584,6 +625,9 @@ pub fn evaluate(
     // follow for notes written by a producer that keyed by commit only —
     // HEAD^2 because a PR checkout is a merge commit git made a moment ago,
     // whose second parent is the pushed tip that carries the note.
+    //
+    // Per object, the green ref first; the legacy ref only when the green
+    // refs hold no note for it (a note is read whole under one name).
     for candidate in [head_tree.as_str(), "HEAD", "HEAD^2"] {
         let Some(object) = git::stdout_in(
             &judge.root,
@@ -591,14 +635,21 @@ pub fn evaluate(
         ) else {
             continue;
         };
-        for r in &refs_main {
-            judge.judge(r, &object, &label(r, candidate));
+        for (names, refs_main, _) in &sets {
+            let mut found = false;
+            for r in refs_main {
+                found |= judge.judge(names, r, &object, &label(r, candidate));
+            }
+            if found {
+                break;
+            }
         }
     }
 
     // Then, lazily, the fingerprint-keyed notes: only for gates the spec
     // declares and nothing above covered. Each costs a few git processes and
     // one notes lookup; the common case (the tree matched) costs nothing.
+    // Each name set computes its own key and reads its own inputs ref.
     let spec_gates: Vec<String> = judge
         .spec
         .as_ref()
@@ -615,12 +666,18 @@ pub fn evaluate(
             );
             continue;
         };
-        let Ok(k) = key(&judge.root, &gate, &fp) else {
-            continue;
-        };
         let at = format!("input {gate} {}", &fp[..12]);
-        for r in &refs_inputs {
-            judge.judge(r, &k, &label(r, &at));
+        for (names, _, refs_inputs) in &sets {
+            let Ok(k) = key_in(&judge.root, names, &gate, &fp) else {
+                continue;
+            };
+            let mut found = false;
+            for r in refs_inputs {
+                found |= judge.judge(names, r, &k, &label(r, &at));
+            }
+            if found {
+                break;
+            }
         }
     }
 
@@ -628,13 +685,20 @@ pub fn evaluate(
     // on another tree whose canonical form is this one's.
     if !judge.exhausted {
         if let Some(c) = judge.canon_here() {
-            if let Ok(k) = canon_key(&judge.root, &c) {
-                let at = format!("canon {}", &c[..12]);
-                for r in &refs_inputs {
-                    judge.judge(r, &k, &label(r, &at));
+            let at = format!("canon {}", &c[..12]);
+            for (names, _, refs_inputs) in &sets {
+                let Ok(k) = canon_key_in(&judge.root, names, &c) else {
+                    continue;
+                };
+                let mut found = false;
+                for r in refs_inputs {
+                    found |= judge.judge(names, r, &k, &label(r, &at));
                 }
-                if judge.canon_used {
-                    push_reason(&mut judge.trail, format!("canonical tree {c}, key {k}"));
+                if found {
+                    if judge.canon_used {
+                        push_reason(&mut judge.trail, format!("canonical tree {c}, key {k}"));
+                    }
+                    break;
                 }
             }
         }
@@ -646,10 +710,15 @@ pub fn evaluate(
             format!("no attestation found for tree {head_tree}"),
         );
     }
+    for ns in &judge.verified_under {
+        judge.trail.push(format!("verified under {ns}"));
+    }
     Verdict {
         gates: judge.covered,
         trail: judge.trail,
         notes,
+        legacy_notes,
+        verified_under: judge.verified_under,
         loud,
         warnings: judge.warnings,
     }
