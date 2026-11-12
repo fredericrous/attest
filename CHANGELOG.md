@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.9.0
+
 - **Verifiers read both note names** (decisions ADR-0068, plan
   greengate-signs-notes-under-green-names, Phase 1). `format::LEGACY` and
   `format::GREEN` hold the two name sets (header, notes and inputs refs, SSH
