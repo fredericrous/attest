@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::fingerprint::{canon, canon_key_in, fingerprint, key_in};
 use crate::format::{
-    canon_claim, field, input_fp, platform_matches, split_blocks, Names, LOCAL_PREFIX, MAX_BLOCKS,
-    READ_ORDER,
+    canon_claim, field, input_fp, platform_matches, split_blocks, Names, GREEN, LEGACY,
+    LOCAL_PREFIX, MAX_BLOCKS,
 };
 use crate::git;
 use crate::notes::{sync_mirrors_of, Mirror};
@@ -34,6 +34,7 @@ pub const MAX_VERIFICATIONS: usize = 64;
 /// stale, signed by another key, or minted on another platform. Carrying the
 /// reasons out of the same code path that made the decision is what keeps
 /// `explain` from becoming a second, drifting implementation of `covered`.
+#[non_exhaustive]
 pub struct Verdict {
     /// Covered gate names, first-appearance order, no duplicates. Empty means
     /// nothing is covered.
@@ -59,7 +60,9 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    fn nothing(reason: impl Into<String>) -> Self {
+    /// Nothing covered, for one reason, before any notes were read: what a
+    /// caller reports when it cannot even start (no signers file, say).
+    pub fn nothing(reason: impl Into<String>) -> Self {
         Verdict {
             gates: Vec::new(),
             trail: vec![reason.into()],
@@ -70,6 +73,15 @@ impl Verdict {
             warnings: Vec::new(),
         }
     }
+}
+
+/// Whether a notes ref holds a note for an object. Only `NoNote` sends a
+/// verifier to the next name set: a note that is there, readable or not,
+/// valid or not, is the one the object is judged by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    NoNote,
+    Found,
 }
 
 /// Record a reason, unless it repeats the one before it.
@@ -260,25 +272,31 @@ impl Judge<'_> {
     /// Judge every block of the note on `object` in `notes_ref`, which holds
     /// notes of the `names` set and of no other: a block is checked under that
     /// set's header, namespace and (through the key it was found by) domain.
-    /// Returns whether the ref has a note for `object` at all, judged now or
-    /// before: the caller reads the next name set only when it has none.
-    fn judge(&mut self, names: &Names, notes_ref: &str, object: &str, at: &str) -> bool {
+    /// Says whether the ref has a note for `object` at all, judged now, before,
+    /// or unreadable: the caller reads the next name set only on `NoNote`.
+    fn judge(&mut self, names: &Names, notes_ref: &str, object: &str, at: &str) -> Lookup {
         let Some(listing) =
             git::stdout_in(&self.root, &["notes", "--ref", notes_ref, "list", object])
         else {
-            return false;
+            return Lookup::NoNote;
         };
         if self.exhausted {
-            return true;
+            return Lookup::Found;
         }
         let note_oid = listing.split_whitespace().next().unwrap_or("").to_string();
         if self.seen_notes.contains(&note_oid) {
-            return true;
+            return Lookup::Found;
         }
         self.seen_notes.push(note_oid);
         let Some(body) = git::stdout_in(&self.root, &["notes", "--ref", notes_ref, "show", object])
         else {
-            return false;
+            // Listed but unreadable (a missing blob, say): a note is there, so
+            // the other name set is NOT read for this object.
+            push_reason(
+                &mut self.trail,
+                format!("cannot read the note on {at} in refs/notes/{notes_ref}"),
+            );
+            return Lookup::Found;
         };
         self.tried = true;
 
@@ -289,7 +307,7 @@ impl Judge<'_> {
                 &mut self.trail,
                 format!("note on {at} contains carriage returns; the format is LF-only"),
             );
-            return true;
+            return Lookup::Found;
         }
 
         let (blocks, truncated) = split_blocks(&body);
@@ -304,7 +322,7 @@ impl Judge<'_> {
                 &mut self.trail,
                 format!("note on {at} carries no signature block"),
             );
-            return true;
+            return Lookup::Found;
         }
         let several = blocks.len() > 1;
         for (i, block) in blocks.iter().enumerate() {
@@ -358,7 +376,7 @@ impl Judge<'_> {
                     format!("the budget of {MAX_VERIFICATIONS} signature verifications is spent; remaining candidates were not read"),
                 );
                 self.exhausted = true;
-                return true;
+                return Lookup::Found;
             }
             self.verifications += 1;
             // Signature BEFORE anything the block's claims could buy it: the
@@ -377,7 +395,6 @@ impl Judge<'_> {
                     continue;
                 }
             };
-            union(&mut self.verified_under, std::iter::once(names.namespace));
             // The uniform rule, per gate: the tree is the checked-out tree,
             // or the block's fingerprint for that gate is the one computed
             // here.
@@ -418,10 +435,12 @@ impl Judge<'_> {
                 " (by input fingerprint)"
             };
             let kept_str = kept.join(" ");
+            let verified_under = names.namespace;
             // A pass is a pass ON SOMETHING: a macOS `cargo test` is no
             // evidence about the Windows leg of a matrix.
             if platform_matches(self.require_platform, ran_on) {
                 union(&mut self.covered, kept.iter().map(String::as_str));
+                union(&mut self.verified_under, std::iter::once(verified_under));
                 self.canon_used |= canon_matches;
                 push_reason(
                     &mut self.trail,
@@ -435,6 +454,9 @@ impl Judge<'_> {
                 .filter(|g| self.anywhere.iter().any(|a| a == g))
                 .collect();
             union(&mut self.covered, accepted.iter().copied());
+            if !accepted.is_empty() {
+                union(&mut self.verified_under, std::iter::once(verified_under));
+            }
             self.canon_used |= canon_matches && !accepted.is_empty();
             let want = self.require_platform.unwrap_or("any");
             let mut reason = format!("attested on {ran_on} by {signer}{how}, this leg is {want}");
@@ -444,7 +466,7 @@ impl Judge<'_> {
             }
             push_reason(&mut self.trail, reason);
         }
-        true
+        Lookup::Found
     }
 }
 
@@ -524,20 +546,32 @@ pub fn evaluate(
 
     // Each name set is synced on its own: a set origin does not have is
     // `Deleted` (nothing judged, nothing lost), never "unreachable".
-    let mut states: Vec<(Names, Mirror, Mirror)> = Vec::new();
-    for names in READ_ORDER {
-        // An origin that did not answer for the first set will not for the
-        // second: asking again would only double the wait.
-        let (m, i) = match states.first() {
-            Some(&(_, m @ (Mirror::TimedOut | Mirror::Unreachable), i)) if i == m => (m, i),
-            _ => sync_mirrors_of(&root, &mut loud, &names),
-        };
-        states.push((names, m, i));
-    }
-    let notes = Some((states[0].1, states[0].2));
-    let legacy_notes = Some((states[1].1, states[1].2));
-    for (names, st_main, st_inputs) in &states {
-        for (r, st) in [(names.notes_ref, *st_main), (names.inputs_ref, *st_inputs)] {
+    //
+    // holds-until: Phase 4 writes greengate refs. Until then origin has no
+    // greengate ref, so the green fetch fails and costs an `ls-remote`, and the
+    // legacy set is a second fetch: up to twice the calls of 1.8.0.
+    let green_sync = sync_mirrors_of(&root, &GREEN);
+    let green = (green_sync.notes, green_sync.inputs);
+    let silent = green_sync.origin_silent();
+    loud.extend(green_sync.loud);
+    // An origin that did not answer for the first set will not for the
+    // second: asking again would only double the wait.
+    let legacy = match silent {
+        Some(state) => (state, state),
+        None => {
+            let legacy_sync = sync_mirrors_of(&root, &LEGACY);
+            loud.extend(legacy_sync.loud);
+            (legacy_sync.notes, legacy_sync.inputs)
+        }
+    };
+    let notes = Some(green);
+    let legacy_notes = Some(legacy);
+    let states = [(GREEN, green), (LEGACY, legacy)];
+    for (names, (notes_mirror, inputs_mirror)) in &states {
+        for (r, st) in [
+            (names.notes_ref, *notes_mirror),
+            (names.inputs_ref, *inputs_mirror),
+        ] {
             if let Some(why) = state_reason(r, st) {
                 push_reason(&mut trail, why);
             }
@@ -578,7 +612,13 @@ pub fn evaluate(
     };
     let sets: Vec<(Names, Vec<String>, Vec<String>)> = states
         .iter()
-        .map(|(n, m, i)| (*n, refs(n.notes_ref, *m), refs(n.inputs_ref, *i)))
+        .map(|(names, (notes_mirror, inputs_mirror))| {
+            (
+                *names,
+                refs(names.notes_ref, *notes_mirror),
+                refs(names.inputs_ref, *inputs_mirror),
+            )
+        })
         .collect();
 
     let Some(head_tree) = git::stdout_in(&root, &["rev-parse", "HEAD^{tree}"]) else {
@@ -638,7 +678,7 @@ pub fn evaluate(
         for (names, refs_main, _) in &sets {
             let mut found = false;
             for r in refs_main {
-                found |= judge.judge(names, r, &object, &label(r, candidate));
+                found |= Lookup::Found == judge.judge(names, r, &object, &label(r, candidate));
             }
             if found {
                 break;
@@ -673,7 +713,7 @@ pub fn evaluate(
             };
             let mut found = false;
             for r in refs_inputs {
-                found |= judge.judge(names, r, &k, &label(r, &at));
+                found |= Lookup::Found == judge.judge(names, r, &k, &label(r, &at));
             }
             if found {
                 break;
@@ -692,7 +732,7 @@ pub fn evaluate(
                 };
                 let mut found = false;
                 for r in refs_inputs {
-                    found |= judge.judge(names, r, &k, &label(r, &at));
+                    found |= Lookup::Found == judge.judge(names, r, &k, &label(r, &at));
                 }
                 if found {
                     if judge.canon_used {
@@ -709,9 +749,6 @@ pub fn evaluate(
             &mut judge.trail,
             format!("no attestation found for tree {head_tree}"),
         );
-    }
-    for ns in &judge.verified_under {
-        judge.trail.push(format!("verified under {ns}"));
     }
     Verdict {
         gates: judge.covered,

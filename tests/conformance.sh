@@ -1068,6 +1068,21 @@ make_repo "$R" cluster-signer@x86_64-linux "$WORK/key"
 note_signed greengate-attest "$G_NS" "$R" "$(payload_for "$R" g-green aarch64-macos "$GN")" "$WORK/key"
 expect_line "names: a platform-bound refusal prints no verified-under line" "" "$R"
 
+# A valid block that covers nothing (another tree) earns no line.
+make_repo "$R" signer@example.org "$WORK/key"
+note_signed greengate-attest "$G_NS" "$R" "$(printf '%s\ntree %s\ngates g\nplatform %s\ngreengate 1.0\n' \
+    "$GN" 0000000000000000000000000000000000000000 "$PLATFORM")" "$WORK/key"
+expect_line "names: a valid block that covers nothing prints no verified-under line" "" "$R"
+
+# A note listed but unreadable (its blob gone) is still a note: the legacy ref
+# is not read for that object.
+make_repo "$R" signer@example.org "$WORK/key"
+attach_note "$R" "$(payload_for "$R" g-legacy "$PLATFORM")" "$WORK/key"
+note_signed greengate-attest "$G_NS" "$R" "$(payload_for "$R" g-green "$PLATFORM" "$GN")" "$WORK/key"
+blob=$(git -C "$R" notes --ref greengate-attest list "$(git -C "$R" rev-parse 'HEAD^{tree}')")
+rm -f "$R/.git/objects/$(printf '%s' "$blob" | cut -c1-2)/$(printf '%s' "$blob" | cut -c3-)"
+check "names: an unreadable green note does not fall back to the legacy ref" "" "$R"
+
 # Origin: a missing old ref, and separately a missing new ref, changes nothing.
 mk_origin() { # sets $R to a clone of a bare origin; extra args: refs to push
     rm -rf "$WORK/origin.git"; git init -q --bare "$WORK/origin.git"

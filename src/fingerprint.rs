@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::format::{is_oid, Names, LEGACY};
+use crate::format::{is_oid, Names, WRITE};
 use crate::git;
 use crate::spec::{implicit_inputs, Spec};
 
@@ -89,9 +89,9 @@ pub fn fingerprint(root: &Path, tree: &str, spec: &Spec, gate: &str) -> Result<S
     hash(root, &listing)
 }
 
-/// The bytes a fingerprint key is hashed from, under the LEGACY names.
+/// The bytes a fingerprint key is hashed from, under the written names ([`WRITE`]).
 pub fn key_preimage(gate: &str, fp: &str) -> String {
-    key_preimage_in(&LEGACY, gate, fp)
+    key_preimage_in(&WRITE, gate, fp)
 }
 
 /// The bytes a fingerprint key is hashed from, under `names`' domain.
@@ -99,10 +99,10 @@ pub fn key_preimage_in(names: &Names, gate: &str, fp: &str) -> String {
     format!("{} {gate} {fp}\n", names.input_domain)
 }
 
-/// The synthetic note key for (gate, fingerprint) under the LEGACY names: an
+/// The synthetic note key for (gate, fingerprint) under the written names ([`WRITE`]): an
 /// oid that is not an object, which `git notes` accepts as a key all the same.
 pub fn key(root: &Path, gate: &str, fp: &str) -> Result<String, Error> {
-    key_in(root, &LEGACY, gate, fp)
+    key_in(root, &WRITE, gate, fp)
 }
 
 /// The same key under `names`: each name set files its inputs under its own
@@ -161,9 +161,9 @@ pub fn canon(root: &Path, tree: &str) -> Result<String, Error> {
     hash(root, text.as_bytes())
 }
 
-/// The bytes the canonical key is hashed from, under the LEGACY names.
+/// The bytes the canonical key is hashed from, under the written names ([`WRITE`]).
 pub fn canon_key_preimage(canon: &str) -> String {
-    canon_key_preimage_in(&LEGACY, canon)
+    canon_key_preimage_in(&WRITE, canon)
 }
 
 /// The bytes the canonical key is hashed from, under `names`' domain.
@@ -171,10 +171,10 @@ pub fn canon_key_preimage_in(names: &Names, canon: &str) -> String {
     format!("{} {canon}\n", names.canon_domain)
 }
 
-/// The synthetic note key for a canonical fingerprint, in the (LEGACY) inputs
-/// ref.
+/// The synthetic note key for a canonical fingerprint, in the written inputs
+/// ref ([`WRITE`]).
 pub fn canon_key(root: &Path, canon: &str) -> Result<String, Error> {
-    canon_key_in(root, &LEGACY, canon)
+    canon_key_in(root, &WRITE, canon)
 }
 
 /// The same key under `names`.

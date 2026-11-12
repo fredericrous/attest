@@ -93,7 +93,9 @@ outputs:
     value: ${{ steps.verify.outputs.covered }}
   notes:
     description: >-
-      What became of refs/notes/greengate-attest, origin's mirror: fetched, absent
+      What became of refs/notes/greengate-attest (since 1.9.0; before, this
+      key reported refs/notes/amont-attest, now in legacy_notes), origin's
+      mirror: fetched, absent
       (origin has none; the local mirror was deleted), unreachable (origin did
       not answer; nothing was judged), unwritable (origin's copy could not
       replace a stale local one, a leftover lock say; nothing was judged),

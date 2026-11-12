@@ -51,9 +51,13 @@ LEGACY set; read it as "the set the note was written under".
   in is refused ("is not `<header>`").
 - **Local mirrors** (`refs/notes/attest-local/…`) follow the same pairing and
   order.
-- **What is printed.** A verification that checked a signature prints the
-  namespace it verified under: `attest: verified under greengate-attest` or
-  `verified under amont-attest` (stderr; in the trail under `explain`). The
+- **What is printed.** For each name set a block COVERED something under
+  (its signature verified and it added at least one gate to the answer), the
+  verifier prints `attest: verified under greengate-attest` or `attest:
+  verified under amont-attest` on stderr, once per set, in every mode
+  (`--quiet` and `explain` included). A valid signature that covers nothing
+  prints no such line. A note the notes ref lists but git cannot read is
+  still a note: the other set is not read for that object. The
   action reports the GREEN refs' state as `notes` and `inputs_notes`, the
   LEGACY refs' as `legacy_notes` and `legacy_inputs_notes`.
 - **The window.** Writers still write the LEGACY set; they switch to GREEN in a
@@ -544,8 +548,9 @@ broken "exit 0" as surely as a crash. A silent origin costs one call, at
 most 15 s; one that fails fast, two, at most 30 s; the worst case, an origin
 that answers `ls-remote` but stalls the second fetch, three, at most 45 s.
 These are the costs of ONE name set. A second set is synced only when the first
-got an answer: an origin that did not answer (`unreachable` or timed out, for
-both refs of the first set) is not asked again, so a silent origin still costs
+got an answer: an origin that did not answer (a call for the first set timed
+out, or both its refs are `unreachable`) is not asked again, and the second set
+takes the same state, so a silent origin still costs
 one call and a dead one two, in total; an origin that answers costs up to twice
 the figures above (one pair per set). A set origin does not have is `absent`.
 

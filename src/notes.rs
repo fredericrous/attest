@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::format::{Names, LEGACY};
+use crate::format::{Names, WRITE};
 use crate::git;
 
 /// What became of one notes ref. SPEC.md, "Lookup".
@@ -131,20 +131,59 @@ fn adopt(root: &Path, notes_ref: &str, tmp: &str, old: Option<&str>) -> Mirror {
     }
 }
 
-/// Bring both mirrors of the LEGACY names in line with origin: one fetch of both refs into
+/// Bring both mirrors of the written names ([`WRITE`]) in line with origin:
+/// one fetch of both refs into
 /// throwaways and, when that fails without timing out, one `ls-remote` to
 /// tell "origin has no such ref" from "origin did not answer" — then, if some
 /// refs exist, one more fetch of those. A silent origin costs one call (15 s
 /// at most), a dead one two (30 s), the worst case three (45 s).
 pub fn sync_mirrors(root: &Path, loud: &mut Vec<String>) -> (Mirror, Mirror) {
-    sync_mirrors_of(root, loud, &LEGACY)
+    let synced = sync_mirrors_of(root, &WRITE);
+    loud.extend(synced.loud);
+    (synced.notes, synced.inputs)
+}
+
+/// What one name set's sync came to: the state of its notes ref and of its
+/// inputs ref, and the lines that report a change to the repository's refs
+/// (a mirror deleted, with how to restore it).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Synced {
+    pub notes: Mirror,
+    pub inputs: Mirror,
+    pub loud: Vec<String>,
+}
+
+impl Synced {
+    /// How origin failed to answer for this set, if it did not: `TimedOut`
+    /// when a deadline cut any call off, `Unreachable` when both refs are.
+    /// Another set's sync would only wait again, so it takes this state.
+    pub fn origin_silent(&self) -> Option<Mirror> {
+        if self.notes == Mirror::TimedOut || self.inputs == Mirror::TimedOut {
+            Some(Mirror::TimedOut)
+        } else if self.notes == Mirror::Unreachable && self.inputs == Mirror::Unreachable {
+            Some(Mirror::Unreachable)
+        } else {
+            None
+        }
+    }
 }
 
 /// [`sync_mirrors`] for one name set's two refs. A verifier syncs each set on
 /// its own, so a set origin does not have (the old one after the census, the
 /// new one before the writers switch) is `Deleted`, which judges nothing and
 /// changes no verdict, never `Unreachable`.
-pub fn sync_mirrors_of(root: &Path, loud: &mut Vec<String>, names: &Names) -> (Mirror, Mirror) {
+pub fn sync_mirrors_of(root: &Path, names: &Names) -> Synced {
+    let mut loud = Vec::new();
+    let (notes, inputs) = sync_pair(root, names, &mut loud);
+    Synced {
+        notes,
+        inputs,
+        loud,
+    }
+}
+
+fn sync_pair(root: &Path, names: &Names, loud: &mut Vec<String>) -> (Mirror, Mirror) {
     if !git::succeeds_in(root, &["remote", "get-url", "origin"]) {
         return (Mirror::NoOrigin, Mirror::NoOrigin);
     }
@@ -246,9 +285,9 @@ pub fn sync_mirrors_of(root: &Path, loud: &mut Vec<String>, names: &Names) -> (M
                         _ => Mirror::Unreachable,
                     }
                 };
-                let m = one(has_main, names.notes_ref, old_main.as_deref(), loud);
-                let i = one(has_inputs, names.inputs_ref, old_inputs.as_deref(), loud);
-                (m, i)
+                let notes_mirror = one(has_main, names.notes_ref, old_main.as_deref(), loud);
+                let inputs_mirror = one(has_inputs, names.inputs_ref, old_inputs.as_deref(), loud);
+                (notes_mirror, inputs_mirror)
             }
             git::Remote::Done(2, _) => (
                 drop_mirror(root, loud, names.notes_ref),

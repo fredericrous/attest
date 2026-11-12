@@ -166,6 +166,7 @@ jobs:
           git init -q --bare "$RUNNER_TEMP/origin.git"
           git remote set-url origin "$RUNNER_TEMP/origin.git"
           git update-ref -d refs/notes/amont-attest || true
+          git update-ref -d refs/notes/greengate-attest || true
           # `git notes add` writes an object and needs a committer identity;
           # a bare runner has none.
           git config user.email ci@example.org
@@ -184,8 +185,13 @@ jobs:
             echo "expected [], got: ${{ steps.bare.outputs.gates }}"; exit 1; }
           [ -z "${{ steps.bare.outputs.covered }}" ] || {
             echo "expected empty covered"; exit 1; }
+          # Both name sets are absent on this origin. The `release` leg runs
+          # the pinned 1.8.0, which has no legacy_notes key and reports the
+          # amont ref as notes: hence the fallback.
           [ '${{ steps.bare.outputs.notes }}' = absent ] || {
             echo 'expected notes=absent, got ${{ steps.bare.outputs.notes }}'; exit 1; }
+          [ '${{ steps.bare.outputs.legacy_notes || steps.bare.outputs.notes }}' = absent ] || {
+            echo 'expected legacy_notes=absent, got ${{ steps.bare.outputs.legacy_notes }}'; exit 1; }
 
       # 2. Mint a real attestation over the tree this job checked out, and
       #    prove the action finds, verifies and reports it.
@@ -299,8 +305,10 @@ jobs:
           # Without include-local the unpushed block is not read at all.
           [ '${{ steps.nolocal.outputs.gates }}' = '["pre-push-cargo-test","pre-push-clippy"]' ] || {
             echo 'no include-local: ${{ steps.nolocal.outputs.gates }}'; exit 1; }
-          [ '${{ steps.nolocal.outputs.notes }}' = fetched ] || {
-            echo 'notes: ${{ steps.nolocal.outputs.notes }}'; exit 1; }
+          # Signers write the amont ref until Phase 4, so its state is
+          # legacy_notes; the pinned 1.8.0 (`release` leg) still calls it notes.
+          [ '${{ steps.nolocal.outputs.legacy_notes || steps.nolocal.outputs.notes }}' = fetched ] || {
+            echo 'legacy_notes: ${{ steps.nolocal.outputs.legacy_notes }}, notes: ${{ steps.nolocal.outputs.notes }}'; exit 1; }
 
       # 5. Input fingerprints, with the real producer. Sign ci-fmt on this
       #    tree with the local key, move the tree with a commit that touches

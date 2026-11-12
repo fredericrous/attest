@@ -2,19 +2,19 @@
 //! names every producer and verifier shares (SPEC.md, "The note").
 
 /// First token of every payload (the LEGACY name until Phase 4 of ADR-0068's
-/// plan; see [`LEGACY`]). A verifier that does not recognise this
+/// plan; see [`WRITE`]). A verifier that does not recognise this
 /// string must treat the note as absent: an unknown version may mean anything,
 /// and "run the tests" is the only safe reading of anything.
-pub const FORMAT: &str = "amont-attest-v2";
+pub const FORMAT: &str = WRITE.format;
 
 /// The notes ref, as `git notes --ref` wants it.
-pub const NOTES_REF: &str = "amont-attest";
+pub const NOTES_REF: &str = WRITE.notes_ref;
 
 /// The second notes ref, keyed by input fingerprint rather than by object.
 /// Every key there is a synthetic oid that is not an object, which is why it
 /// is a separate ref: `git notes prune` on it would drop everything, and the
 /// main ref keeps its 1.x invariant that every key is real.
-pub const INPUTS_REF: &str = "amont-attest-inputs";
+pub const INPUTS_REF: &str = WRITE.inputs_ref;
 
 /// Where `sign.sh --no-push` keeps blocks that never reached origin, under
 /// `refs/notes/`, prefixed to either ref name above. Origin cannot revoke
@@ -24,7 +24,7 @@ pub const LOCAL_PREFIX: &str = "attest-local/";
 /// The `ssh-keygen -Y` namespace. Namespaces exist so a signature minted for
 /// one purpose cannot be replayed for another; an `allowed_signers` entry
 /// pinned to this namespace accepts nothing else.
-pub const NAMESPACE: &str = "amont-attest";
+pub const NAMESPACE: &str = WRITE.namespace;
 
 /// One complete set of the names a signed attestation lives under: its header,
 /// the two notes refs, the SSH namespace, the two fingerprint domains and the
@@ -49,10 +49,8 @@ pub struct Names {
     pub producer: &'static str,
 }
 
-/// The names notes have been written under since 1.0. The constants
-/// [`FORMAT`], [`NOTES_REF`], [`INPUTS_REF`] and [`NAMESPACE`] equal these
-/// until Phase 4 swaps them to [`GREEN`]: writers (and dependents that sign
-/// with those constants) keep writing LEGACY until then. Removed at the census.
+/// The names notes have been written under since 1.0, and still are until
+/// [`WRITE`] becomes [`GREEN`] in Phase 4. Removed at the census.
 pub const LEGACY: Names = Names {
     format: "amont-attest-v2",
     notes_ref: "amont-attest",
@@ -75,9 +73,13 @@ pub const GREEN: Names = Names {
     producer: "greengate",
 };
 
-/// The order a verifier reads in: the green names win, the legacy names are
-/// read only for an object the green ref has no note for.
-pub const READ_ORDER: [Names; 2] = [GREEN, LEGACY];
+/// The ONE owner of what is written: [`FORMAT`], [`NOTES_REF`],
+/// [`INPUTS_REF`], [`NAMESPACE`], the producer word of [`payload`] and the
+/// set-less functions (`fingerprint::key`, `canon_key`, their preimages,
+/// `notes::sync_mirrors`) all derive from it. LEGACY until Phase 4, which
+/// changes this one line to `GREEN`: a dependent signing with the constants
+/// (greengate, through a caret pin) cannot write the new names earlier.
+pub const WRITE: Names = LEGACY;
 
 /// How many blocks of one note are read. Every block costs two `ssh-keygen`
 /// runs, and the notes ref is writable by anyone with push access.
@@ -282,7 +284,7 @@ pub fn payload(
     if let Some(c) = canon {
         out.push_str(&format!("canon {c}\n"));
     }
-    out.push_str(&format!("amont {producer}\n"));
+    out.push_str(&format!("{} {producer}\n", WRITE.producer));
     out
 }
 

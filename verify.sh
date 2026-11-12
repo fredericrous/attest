@@ -28,7 +28,8 @@
 # this design's worst property: when a skip does not happen, nothing tells you
 # whether the attestation was absent, stale, signed by the wrong key, or minted
 # on another platform. A CI log is exactly the place to spend four lines saying
-# which.
+# which. `--quiet` does not hide `attest: verified under <namespace>`, said for
+# each name set a covering block verified under, nor a deleted mirror.
 #
 # `--include-local` also reads refs/notes/attest-local/*: blocks signed with
 # `sign.sh --no-push` that never reached origin, so origin cannot revoke them.
@@ -84,7 +85,7 @@ while [ $# -gt 0 ]; do
         --json)          mode=json; shift ;;
         --github-output) mode=gha;  shift ;;
         --quiet)     quiet=1; shift ;;
-        -h|--help)   sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'verify.sh: unknown argument %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -395,7 +396,10 @@ for s in $SETS; do
     use_set "$s"
     # An origin that did not answer for the first set will not for the second:
     # asking again would only double the wait.
-    if [ "$s" = legacy ] && [ "$st_main_green" = unreachable ] && [ "$st_inputs_green" = unreachable ]; then
+    # holds-until: Phase 4 writes greengate refs. Until then origin has no
+    # greengate ref, so the green fetch fails and costs an ls-remote, and the
+    # legacy set is a second fetch.
+    if [ "$s" = legacy ] && { [ -n "$timed_out" ] || { [ "$st_main_green" = unreachable ] && [ "$st_inputs_green" = unreachable ]; }; }; then
         st_main=unreachable; st_inputs=unreachable
     else
         timed_out=
@@ -851,6 +855,14 @@ kept_gates() {
 # Accumulates into $covered; a note seen before is skipped by its oid, a
 # block seen before by its bytes (its verdict depends only on its content and
 # HEAD, whichever note it appears in).
+# The name set a block that COVERED something verified under (a valid
+# signature that covers nothing is not counted): the rollout counts these.
+mark_verified_under() {
+    case " $verified_under " in
+        *" $NAMESPACE "*) ;;
+        *) verified_under="$verified_under $NAMESPACE" ;;
+    esac
+}
 covered=; seen=; seen_blocks=; verified_under=; tried=; verifications=0; exhausted=
 judge_note() {
     local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here every_principal bound_refusal candidate bound
@@ -861,7 +873,12 @@ judge_note() {
     note_oid=${note_oid%% *}
     in_list "$note_oid" "$seen" && return 0
     seen="$seen $note_oid"
-    body=$(git notes --ref "$nref" show "$object" 2> /dev/null) || return 1
+    # Listed but unreadable: a note is there, so the other name set is NOT
+    # read for this object.
+    body=$(git notes --ref "$nref" show "$object" 2> /dev/null) || {
+        note "cannot read the note on $at in refs/notes/$nref"
+        return 0
+    }
     tried=yes
 
     # LF only. Checked by the shell itself, before any tool sees the note:
@@ -962,12 +979,6 @@ PRINCIPALS
             note "$bound_refusal"
             continue
         fi
-        # Only a block whose signature verified AND whose principal may sign it
-        # (the Rust path's `sign::verify` is both): the rollout counts these.
-        case " $verified_under " in
-            *" $NAMESPACE "*) ;;
-            *) verified_under="$verified_under $NAMESPACE" ;;
-        esac
 
         # The uniform rule, per gate: the tree is the checked-out tree, or the
         # block's canonical tree is the checked-out one's, or the block's
@@ -999,12 +1010,14 @@ PRINCIPALS
         # ran; `--anywhere` says it of the named gates only.
         if platform_matches "$platform" "$ran_on"; then
             covered=$(union "$covered" "$kept")
+            mark_verified_under
             [ -z "$canon_ok" ] || canon_used=1
             note "covered by $signer on $ran_on$how: $kept"
             continue
         fi
         accepted=$(intersect "$kept" "$anywhere")
         covered=$(union "$covered" "$accepted")
+        [ -z "$accepted" ] || mark_verified_under
         [ -z "$canon_ok" ] || [ -z "$accepted" ] || canon_used=1
         if [ -n "$accepted" ]; then
             note "attested on $ran_on by $signer$how, this leg is $platform; accepted anywhere: $accepted"

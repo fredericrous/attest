@@ -7,6 +7,7 @@
 
 mod cli_sign;
 
+use git_attest::notes::Mirror;
 use git_attest::{format, verify as attest};
 
 const USAGE: &str = "\
@@ -250,6 +251,7 @@ fn run(args: &[String]) -> u8 {
             verified_under,
             loud,
             warnings,
+            ..
         } = verdict;
         // A change to the repository's refs is always reported, `explain` or
         // not: data went away, and the line says how to bring it back.
@@ -265,11 +267,11 @@ fn run(args: &[String]) -> u8 {
             for line in &warnings {
                 eprintln!("attest: {line}");
             }
-            // The name each verification went through: the rollout counts
-            // these lines, so they are not an `explain` extra.
-            for ns in &verified_under {
-                eprintln!("attest: verified under {ns}");
-            }
+        }
+        // The name each covering block verified under, in every mode, as
+        // verify.sh does: the rollout counts these lines.
+        for ns in &verified_under {
+            eprintln!("attest: verified under {ns}");
         }
         if gha {
             // Both forms. `covered` is the legacy string a downstream
@@ -277,12 +279,15 @@ fn run(args: &[String]) -> u8 {
             // that matches element-wise and is the one to use.
             println!("covered={}", gates.join(" "));
             println!("gates={}", as_json(&gates));
-            let (m, i) = notes.map_or(("", ""), |(m, i)| (m.as_str(), i.as_str()));
-            println!("notes={m}");
-            println!("inputs_notes={i}");
-            let (m, i) = legacy_notes.map_or(("", ""), |(m, i)| (m.as_str(), i.as_str()));
-            println!("legacy_notes={m}");
-            println!("legacy_inputs_notes={i}");
+            let states = |pair: Option<(Mirror, Mirror)>| {
+                pair.map_or(("", ""), |(main, inputs)| (main.as_str(), inputs.as_str()))
+            };
+            let (notes_state, inputs_state) = states(notes);
+            println!("notes={notes_state}");
+            println!("inputs_notes={inputs_state}");
+            let (notes_state, inputs_state) = states(legacy_notes);
+            println!("legacy_notes={notes_state}");
+            println!("legacy_inputs_notes={inputs_state}");
         } else if json {
             println!("{}", as_json(&gates));
         } else if !gates.is_empty() {
@@ -297,17 +302,9 @@ fn run(args: &[String]) -> u8 {
         .map(|s| attest::resolve_signers(&here, s))
         .or_else(|| attest::default_signers(&here))
     else {
-        return done(attest::Verdict {
-            gates: Vec::new(),
-            trail: vec![
-                "no allowed_signers found (.forgejo/ or .github/) at the repository root".into(),
-            ],
-            notes: None,
-            legacy_notes: None,
-            verified_under: Vec::new(),
-            loud: Vec::new(),
-            warnings: Vec::new(),
-        });
+        return done(attest::Verdict::nothing(
+            "no allowed_signers found (.forgejo/ or .github/) at the repository root",
+        ));
     };
 
     // `any` is the deliberate, committed statement that a suite's result does
