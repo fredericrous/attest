@@ -9,3 +9,35 @@ Pointer plan. The canonical plan (see `canonical` above) moves every signed-note
 
 ## Code review
 - attest: backend, lang:rust, unix, architect (lang:typescript left out: no TypeScript here; tui left out: verify output unchanged apart from names)
+
+## Phases (this repository)
+
+- [x] Phase 1 — git-attest reads both, writes old (commits 9e8ff62, 9f7224f). `fetch.sh` needed no change: it names no notes ref.
+- [ ] Phase 4 — writers switch (`format::WRITE` becomes `GREEN`).
+- [ ] Phase 5 — census: the legacy reads go.
+
+## Verification
+
+Phase 1, input → expected → actual:
+
+| check | input | expected | actual |
+|---|---|---|---|
+| old-name note verifies | `tests/names.rs` `an_amont_note_is_verified_and_named`; conformance `names: an amont-attest note covers` | covered, `verified under amont-attest` | pass (both implementations) |
+| new-name note verifies | `a_greengate_note_is_verified_and_named`; `names: a greengate-attest note covers` | covered, `verified under greengate-attest` | pass |
+| old header under the new namespace refused | `an_old_header_block_is_refused_under_the_new_namespace`; `names: an old header signed under the new namespace in the legacy ref is refused` | nothing covered | pass |
+| new header under the old namespace refused | `a_new_header_block_is_refused_under_the_old_namespace`; `names: a green header signed under the old namespace is refused` | nothing covered | pass |
+| missing old ref on origin | `a_missing_old_ref_on_origin_leaves_the_verdict_unchanged`; `names: origin has only the green ref (no amont ref): covered` | covered; `legacy_notes=absent`; no "running everything" | pass |
+| missing new ref on origin | `a_missing_new_ref_on_origin_leaves_the_verdict_unchanged`; `names: origin has only the amont ref (no green ref): covered` | covered; `notes=absent` | pass |
+| new ref wins | `the_greengate_ref_wins_when_both_exist`, `the_green_ref_wins_on_origin_too`; `names: both exist, the greengate ref wins` | green gates only | pass |
+| constants still LEGACY | `the_constants_still_equal_the_legacy_names`, `every_written_name_derives_from_write` | `WRITE == LEGACY`; keys and producer word from `WRITE` | pass |
+| unreadable green note | `an_unreadable_green_note_does_not_fall_back_to_legacy`; `names: an unreadable green note does not fall back to the legacy ref` | nothing covered, trail names it | pass |
+| full suite | `make check` (lint, `cargo test`, conformance both implementations + legacy negative control, compat, sign-test, fetch-test) | 0 failed | conformance 260/260 (verify.sh), 252/252 (git-attest); sign-test 153/153/152/152; fetch-test 24/24; exit 0 |
+| the tests fail without the change | the same `tests/conformance.sh` against `origin/main` (1.8.0) built from `git archive` | the green-name and output-key cases fail | verify.sh 245 passed, 15 failed; git-attest 237 passed, 15 failed (the 12 green-name cases and 3 `github-output` cases); `tests/names.rs` does not compile against 1.8.0 |
+
+After the release (not pending here): the CI action on a scratch repository verifies a 1.8.0-signed note.
+
+## Decision log
+
+- 2026-11-12 — the ref a note sits in picks the name set, and the header of each block must match it: stricter than "the header decides". A green header found under the old ref (or an old header under the new ref) is refused, never re-read under the other set.
+- 2026-11-12 — a note the ref lists but git cannot read counts as found: the other set is not read for that object.
+- 2026-11-12 — `verified under <ns>` is printed only for a block that covered at least one gate, in every mode.
