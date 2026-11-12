@@ -26,7 +26,7 @@ struct Fixture {
 impl Fixture {
     fn new(name: &str, principal: &str) -> Fixture {
         let dir = std::env::temp_dir().join(format!("attest-bound-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir); // a leftover from an earlier run; absent is the normal case
         std::fs::create_dir_all(&dir).unwrap();
         run(
             &dir,
@@ -60,8 +60,12 @@ impl Fixture {
     }
 
     fn attest(&self, platform: &str) {
+        self.attest_payload(&format!("platform {platform}\n"));
+    }
+
+    fn attest_payload(&self, platform_line: &str) {
         let payload = format!(
-            "amont-attest-v2\ntree {}\ngates test lint\nplatform {platform}\n",
+            "amont-attest-v2\ntree {}\ngates test lint\n{platform_line}",
             self.tree
         );
         std::fs::write(self.dir.join("payload"), &payload).unwrap();
@@ -93,11 +97,20 @@ impl Fixture {
     }
 
     fn covered(&self, require: Option<&str>, anywhere: &[&str]) -> (Vec<String>, String) {
+        self.covered_as(None, require, anywhere)
+    }
+
+    fn covered_as(
+        &self,
+        principal: Option<&str>,
+        require: Option<&str>,
+        anywhere: &[&str],
+    ) -> (Vec<String>, String) {
         let anywhere: Vec<String> = anywhere.iter().map(|g| g.to_string()).collect();
         let verdict = evaluate(
             &self.dir,
             &self.dir.join("allowed_signers"),
-            None,
+            principal,
             require,
             &anywhere,
             true,
@@ -108,7 +121,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.dir); // temp dir cleanup; a leftover is harmless
     }
 }
 
@@ -147,4 +160,50 @@ fn an_unbound_principal_is_unchanged() {
     f.attest("aarch64-macos");
     let (gates, trail) = f.covered(None, &[]);
     assert_eq!(gates, ["test", "lint"], "{trail}");
+}
+
+#[test]
+fn a_bound_signer_with_no_platform_line_covers_nothing() {
+    let f = Fixture::new("noplatform", "cluster-signer@x86_64-linux");
+    f.attest_payload("");
+    let (gates, trail) = f.covered(None, &[]);
+    assert!(gates.is_empty(), "{trail}");
+    assert!(trail.contains("missing a required field"), "{trail}");
+}
+
+#[test]
+fn the_refusal_for_a_block_with_no_platform_reads_names_no_platform() {
+    let refusal = git_attest::sign::Error::PlatformBound {
+        signer: "cluster-signer@x86_64-linux".to_string(),
+        bound: "x86_64-linux".to_string(),
+        platform: None,
+    };
+    assert_eq!(
+        refusal.to_string(),
+        "cluster-signer@x86_64-linux may sign only x86_64-linux blocks; this block names no platform"
+    );
+}
+
+#[test]
+fn an_explicit_bound_principal_is_checked() {
+    let f = Fixture::new("explicit", "cluster-signer@x86_64-linux");
+    f.attest("aarch64-macos");
+    let (gates, trail) = f.covered_as(Some("cluster-signer@x86_64-linux"), None, &[]);
+    assert!(gates.is_empty(), "{trail}");
+    assert!(trail.contains(REFUSAL), "{trail}");
+    let matching = Fixture::new("explicit-ok", "cluster-signer@x86_64-linux");
+    matching.attest("x86_64-linux");
+    let (gates, trail) = matching.covered_as(Some("cluster-signer@x86_64-linux"), None, &[]);
+    assert_eq!(gates, ["test", "lint"], "{trail}");
+}
+
+#[test]
+fn every_principal_of_the_key_is_checked() {
+    // One allowed_signers line listing both principals: ssh-keygen answers
+    // with each of them, the unbound one first.
+    let f = Fixture::new("both", "dev@example.org,cluster-signer@x86_64-linux");
+    f.attest("aarch64-macos");
+    let (gates, trail) = f.covered(None, &[]);
+    assert!(gates.is_empty(), "{trail}");
+    assert!(trail.contains(REFUSAL), "{trail}");
 }
