@@ -317,21 +317,21 @@ canon_vectors() { # script
             in:none) state=none ;;
             want:end | none:end)
                 cases=$((cases + 1))
-                rm -rf "$WORK/vec.tmp"; mkdir "$WORK/vec.tmp"
-                # tmp and root are read by the block's functions, and git is
-                # called by them: shellcheck sees neither through the eval.
-                # shellcheck disable=SC2034,SC2317
+                rm -rf "$WORK/vec.tmp" "$WORK/vec.bin"; mkdir "$WORK/vec.tmp" "$WORK/vec.bin"
+                # The block's functions call `git`: a stub on PATH answers
+                # ls-tree from the vector and hash-object with its stdin.
+                printf '%s\n' '#!/bin/sh' 'case " $* " in' \
+                    "  *\" ls-tree \"*) cat '$WORK/vec.list' ;;" \
+                    '  *" hash-object "*) cat ;;' '  *) exit 1 ;;' 'esac' \
+                    > "$WORK/vec.bin/git"
+                chmod +x "$WORK/vec.bin/git"
+                # tmp and root are read by the block's functions: shellcheck
+                # does not see them through the eval.
+                # shellcheck disable=SC2034
                 (
                     tmp=$WORK/vec.tmp; root=''
-                    git() {
-                        case " $* " in
-                            *" ls-tree "*) cat "$WORK/vec.list" ;;
-                            *" hash-object "*) cat ;;
-                            *) return 1 ;;
-                        esac
-                    }
                     eval "$block"
-                    canon_of TREE > "$WORK/vec.got"
+                    PATH="$WORK/vec.bin:$PATH" canon_of TREE > "$WORK/vec.got"
                 )
                 rc=$?
                 if [ "$state" = none ]; then

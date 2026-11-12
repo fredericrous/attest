@@ -52,23 +52,26 @@ impl Drop for SigFile {
 /// replaced hardcoded `-I you@example.com`; the first release guessed the
 /// file's first entry, which silently uncovered every other signer on a team.
 /// `find-principals` answers from the key that actually signed.
-fn find_principal(sig_file: &Path, allowed_signers: &Path) -> Option<String> {
+fn find_principals(sig_file: &Path, allowed_signers: &Path) -> Vec<String> {
     let out = Command::new("ssh-keygen")
         .args(["-Y", "find-principals", "-s"])
         .arg(sig_file)
         .arg("-f")
         .arg(allowed_signers)
         .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
     if !out.status.success() {
-        return None;
+        return Vec::new();
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
+        .filter(|l| !l.is_empty())
         .map(str::to_string)
+        .collect()
 }
 
 /// Why a signature was not accepted. `Display` is the reason the verifier
@@ -82,6 +85,12 @@ pub enum Error {
     UnknownSigner { signers: PathBuf },
     /// `ssh-keygen -Y verify` refused it.
     DoesNotVerify { signer: String, signers: PathBuf },
+    /// The signer is bound to one platform and the block claims another.
+    PlatformBound {
+        signer: String,
+        bound: String,
+        platform: Option<String>,
+    },
     /// `ssh-keygen -y` cannot load the private key unencrypted.
     KeyUnusable,
     /// The key loads but is not ed25519, the one type whose signatures are
@@ -105,6 +114,20 @@ impl std::fmt::Display for Error {
                 "signature does not verify as {signer} against {}",
                 signers.display()
             ),
+            Error::PlatformBound {
+                signer,
+                bound,
+                platform,
+            } => match platform {
+                Some(platform) => write!(
+                    f,
+                    "{signer} may sign only {bound} blocks; this block is {platform}"
+                ),
+                None => write!(
+                    f,
+                    "{signer} may sign only {bound} blocks; this block names no platform"
+                ),
+            },
             Error::KeyUnusable => write!(
                 f,
                 "not a usable unencrypted OpenSSH private key (passphrase-protected? a .pub pasted by mistake?)"
@@ -121,7 +144,10 @@ impl std::error::Error for Error {}
 
 /// `ssh-keygen -Y verify` over the exact signed bytes, in `namespace`, as
 /// `principal` — or, when none is given, as whoever the signature says. `Ok`
-/// carries the identity the signature verified as.
+/// carries the identity the signature verified as. A signer whose principal
+/// is platform-bound (`format::bound_platform`) is refused for a payload whose
+/// `platform` field is absent or differs; with no principal given, every
+/// principal the key answers to is checked and any bound one refuses.
 pub fn verify(
     namespace: &str,
     payload: &str,
@@ -133,13 +159,14 @@ pub fn verify(
     let Some(sig_file) = SigFile::new(sig) else {
         return Err(Error::TempFile);
     };
-    let signer = match principal {
-        Some(p) => p.to_string(),
-        None => {
-            find_principal(&sig_file.0, allowed_signers).ok_or_else(|| Error::UnknownSigner {
-                signers: allowed_signers.to_path_buf(),
-            })?
-        }
+    let principals = match principal {
+        Some(p) => vec![p.to_string()],
+        None => find_principals(&sig_file.0, allowed_signers),
+    };
+    let Some(signer) = principals.first().cloned() else {
+        return Err(Error::UnknownSigner {
+            signers: allowed_signers.to_path_buf(),
+        });
     };
     let ok = (|| {
         let mut child = Command::new("ssh-keygen")
@@ -157,6 +184,19 @@ pub fn verify(
     })()
     .unwrap_or(false);
     if ok {
+        let platform = crate::format::field(payload, "platform");
+        for candidate in &principals {
+            if let Some(bound) = crate::format::bound_platform(candidate) {
+                if platform != Some(bound) {
+                    let bound = bound.to_string();
+                    return Err(Error::PlatformBound {
+                        signer: candidate.clone(),
+                        bound,
+                        platform: platform.map(str::to_string),
+                    });
+                }
+            }
+        }
         Ok(signer)
     } else {
         Err(Error::DoesNotVerify {

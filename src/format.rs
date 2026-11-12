@@ -39,6 +39,19 @@ pub fn platform() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
 
+/// The platform a signer principal is bound to: the text after its last `@`
+/// when that is `<arch>-<os>` over the closed sets below, else `None`. A
+/// principal that names no platform (`ci@relais`, an email address) is
+/// unbound, and so is one whose suffix has any other shape
+/// (`x@x86_64-linux-gnu`, `x@riscv64-linux`).
+pub fn bound_platform(principal: &str) -> Option<&str> {
+    const ARCHES: [&str; 2] = ["x86_64", "aarch64"];
+    const SYSTEMS: [&str; 3] = ["linux", "macos", "windows"];
+    let (_, suffix) = principal.rsplit_once('@')?;
+    let (arch, system) = suffix.split_once('-')?;
+    (ARCHES.contains(&arch) && SYSTEMS.contains(&system)).then_some(suffix)
+}
+
 /// One signed statement out of a note: the exact bytes that were signed
 /// (trailing newline included) and the armored signature over them.
 #[derive(Debug, PartialEq)]

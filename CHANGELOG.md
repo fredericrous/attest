@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Platform-bound signer principals.** A principal ending in
+  `@<arch>-<os>` (arch `x86_64` or `aarch64`; os `linux`, `macos` or
+  `windows`) may sign only blocks whose `platform` is that platform;
+  `sign::verify` refuses any other with a new `sign::Error::PlatformBound`.
+  A block with no `platform` line is refused too, and every principal a key
+  answers to is checked. `verify.sh` enforces the same rule, and the library
+  exports `format::bound_platform`. Other principals are unchanged. Add a bound
+  principal to an `allowed_signers` file only after every verifier reading it
+  (git-attest binary, `verify.sh`, the action's pinned release) runs a version
+  with this rule. See SPEC.md, "Platform-bound principals".
+
 ## 1.7.0
 
 - **The actions run the binary** (decisions ADR-0037). `action.yml` runs

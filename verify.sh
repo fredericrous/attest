@@ -558,6 +558,15 @@ intersect() {
 # Is $1 one of the names in $2?
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# The platform a principal is bound to: the text after its last `@` when that
+# is `<arch>-<os>` over the closed sets, else nothing.
+bound_platform() {
+    case "${1##*@}" in
+        x86_64-linux|x86_64-macos|x86_64-windows|aarch64-linux|aarch64-macos|aarch64-windows)
+            case "$1" in *@*) printf '%s' "${1##*@}" ;; esac ;;
+    esac
+}
+
 # Does an attestation minted on $2 satisfy the caller's $1? `any` takes all; a
 # value with a dash is an exact <arch>-<os>; an OS alone is compared to the
 # part after the LAST dash — never as a substring, so `inux` matches nothing.
@@ -791,7 +800,7 @@ kept_gates() {
 # HEAD, whichever note it appears in).
 covered=; seen=; seen_blocks=; tried=; verifications=0; exhausted=
 judge_note() {
-    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here
+    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here every_principal bound_refusal candidate bound
     [ -z "$exhausted" ] || return 0
     note_oid=$(git notes --ref "$nref" list "$object" 2> /dev/null) || return 0
     note_oid=${note_oid%% *}
@@ -863,8 +872,10 @@ judge_note() {
         # actually signed, so a multi-signer file just works; `--principal`
         # narrows it to one identity.
         signer=$principal
+        every_principal=$principal
         if [ -z "$signer" ]; then
-            signer=$(ssh-keygen -Y find-principals -s "$sig_file" -f "$signers" 2> /dev/null | sed -n 1p)
+            every_principal=$(ssh-keygen -Y find-principals -s "$sig_file" -f "$signers" 2> /dev/null)
+            signer=$(printf '%s\n' "$every_principal" | sed -n 1p)
             [ -n "$signer" ] || { note "signature on $where was not made by any key in $signers"; continue; }
         fi
 
@@ -876,6 +887,26 @@ judge_note() {
             note "signature on $where does not verify as $signer against $signers"
             continue
         }
+
+        # A principal ending in `@<arch>-<os>` is bound to that platform: once
+        # the signature verifies, a block whose platform differs (or is absent)
+        # covers nothing, whatever --platform and --anywhere say. Every
+        # principal the key answers to is checked, not only the first.
+        bound_refusal=
+        while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            bound=$(bound_platform "$candidate")
+            if [ -n "$bound" ] && [ "$bound" != "$ran_on" ]; then
+                bound_refusal="$candidate may sign only $bound blocks; this block is $ran_on"
+                break
+            fi
+        done <<PRINCIPALS
+$every_principal
+PRINCIPALS
+        if [ -n "$bound_refusal" ]; then
+            note "$bound_refusal"
+            continue
+        fi
 
         # The uniform rule, per gate: the tree is the checked-out tree, or the
         # block's canonical tree is the checked-out one's, or the block's
