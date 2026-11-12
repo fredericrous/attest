@@ -27,7 +27,9 @@
 - `Verdict` gains `legacy_notes` and `verified_under`, and is now
   `#[non_exhaustive]` (build one with `Verdict::nothing`). Every verification
   whose block covered a gate prints `attest: verified under <namespace>` on
-  stderr, in every mode. A second name set is not synced when origin did not
+  stderr, in every mode; it is not part of the `--explain` trail (the
+  `Verdict::verified_under` field carries it for library callers, which print
+  it themselves). A second name set is not synced when origin did not
   answer for the first. See SPEC.md, "Names".
 
 ## 1.8.0

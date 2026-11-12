@@ -77,8 +77,10 @@ pub const GREEN: Names = Names {
 /// [`INPUTS_REF`], [`NAMESPACE`], the producer word of [`payload`] and the
 /// set-less functions (`fingerprint::key`, `canon_key`, their preimages,
 /// `notes::sync_mirrors`) all derive from it. LEGACY until Phase 4, which
-/// changes this one line to `GREEN`: a dependent signing with the constants
-/// (greengate, through a caret pin) cannot write the new names earlier.
+/// changes this line to `GREEN`, together with the four name assignments in
+/// `sign/sign.sh` (held equal to these by `tests/sign.sh`): a dependent
+/// signing with the constants (greengate, through a caret pin) cannot write
+/// the new names earlier.
 pub const WRITE: Names = LEGACY;
 
 /// How many blocks of one note are read. Every block costs two `ssh-keygen`

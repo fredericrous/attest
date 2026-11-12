@@ -400,8 +400,11 @@ fn a_missing_old_ref_on_origin_leaves_the_verdict_unchanged() {
     let verdict = fixture.verdict();
     assert_eq!(verdict.gates, gates(&["g-green"]));
     // Origin answered: the absent set is absent, never "not judged".
-    let (m, i) = verdict.legacy_notes.unwrap();
-    assert_eq!((m.as_str(), i.as_str()), ("absent", "absent"));
+    let (notes_mirror, inputs_mirror) = verdict.legacy_notes.unwrap();
+    assert_eq!(
+        (notes_mirror.as_str(), inputs_mirror.as_str()),
+        ("absent", "absent")
+    );
     assert!(
         !verdict
             .trail
@@ -419,8 +422,11 @@ fn a_missing_new_ref_on_origin_leaves_the_verdict_unchanged() {
     fixture.publish_only(&["amont-attest"]);
     let verdict = fixture.verdict();
     assert_eq!(verdict.gates, gates(&["g-legacy"]));
-    let (m, i) = verdict.notes.unwrap();
-    assert_eq!((m.as_str(), i.as_str()), ("absent", "absent"));
+    let (notes_mirror, inputs_mirror) = verdict.notes.unwrap();
+    assert_eq!(
+        (notes_mirror.as_str(), inputs_mirror.as_str()),
+        ("absent", "absent")
+    );
     assert!(
         !verdict
             .trail

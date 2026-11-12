@@ -55,7 +55,9 @@ LEGACY set; read it as "the set the note was written under".
   (its signature verified and it added at least one gate to the answer), the
   verifier prints `attest: verified under greengate-attest` or `attest:
   verified under amont-attest` on stderr, once per set, in every mode
-  (`--quiet` and `explain` included). A valid signature that covers nothing
+  (`--quiet` and `explain` included), and not inside the `explain` trail:
+  a library caller reads `verified_under` and prints it. A valid signature
+  that covers nothing
   prints no such line. A note the notes ref lists but git cannot read is
   still a note: the other set is not read for that object. The
   action reports the GREEN refs' state as `notes` and `inputs_notes`, the

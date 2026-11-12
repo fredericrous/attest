@@ -174,18 +174,15 @@ impl Synced {
 /// new one before the writers switch) is `Deleted`, which judges nothing and
 /// changes no verdict, never `Unreachable`.
 pub fn sync_mirrors_of(root: &Path, names: &Names) -> Synced {
+    // Every line this sync has to say goes into `loud`, returned with the
+    // mirrors: the helpers below borrow it, nothing outside does.
     let mut loud = Vec::new();
-    let (notes, inputs) = sync_pair(root, names, &mut loud);
-    Synced {
-        notes,
-        inputs,
-        loud,
-    }
-}
-
-fn sync_pair(root: &Path, names: &Names, loud: &mut Vec<String>) -> (Mirror, Mirror) {
     if !git::succeeds_in(root, &["remote", "get-url", "origin"]) {
-        return (Mirror::NoOrigin, Mirror::NoOrigin);
+        return Synced {
+            notes: Mirror::NoOrigin,
+            inputs: Mirror::NoOrigin,
+            loud,
+        };
     }
     sweep_tmp_refs(root);
     let pid = std::process::id();
@@ -285,13 +282,18 @@ fn sync_pair(root: &Path, names: &Names, loud: &mut Vec<String>) -> (Mirror, Mir
                         _ => Mirror::Unreachable,
                     }
                 };
-                let notes_mirror = one(has_main, names.notes_ref, old_main.as_deref(), loud);
-                let inputs_mirror = one(has_inputs, names.inputs_ref, old_inputs.as_deref(), loud);
+                let notes_mirror = one(has_main, names.notes_ref, old_main.as_deref(), &mut loud);
+                let inputs_mirror = one(
+                    has_inputs,
+                    names.inputs_ref,
+                    old_inputs.as_deref(),
+                    &mut loud,
+                );
                 (notes_mirror, inputs_mirror)
             }
             git::Remote::Done(2, _) => (
-                drop_mirror(root, loud, names.notes_ref),
-                drop_mirror(root, loud, names.inputs_ref),
+                drop_mirror(root, &mut loud, names.notes_ref),
+                drop_mirror(root, &mut loud, names.inputs_ref),
             ),
             git::Remote::TimedOut => (Mirror::TimedOut, Mirror::TimedOut),
             _ => (Mirror::Unreachable, Mirror::Unreachable),
@@ -300,7 +302,12 @@ fn sync_pair(root: &Path, names: &Names, loud: &mut Vec<String>) -> (Mirror, Mir
     for r in [names.notes_ref, names.inputs_ref] {
         let _ = git::succeeds_in(root, &["update-ref", "-d", &tmp(r)]);
     }
-    states
+    let (notes, inputs) = states;
+    Synced {
+        notes,
+        inputs,
+        loud,
+    }
 }
 
 // ---------------------------------------------------------------------------
