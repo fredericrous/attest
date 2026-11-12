@@ -41,3 +41,9 @@ After the release (not pending here): the CI action on a scratch repository veri
 - 2026-11-12 — the ref a note sits in picks the name set, and the header of each block must match it: stricter than "the header decides". A green header found under the old ref (or an old header under the new ref) is refused, never re-read under the other set.
 - 2026-11-12 — a note the ref lists but git cannot read counts as found: the other set is not read for that object.
 - 2026-11-12 — `verified under <ns>` is printed only for a block that covered at least one gate, in every mode.
+
+## Implementation review
+
+- Phase 1, round 1 then two deltas, all approve on tree f9129a4f: implementation-review (round 1 approve-with-changes: plan record, output parameter, flag argument, single-letter names; fixed in 9f7224f and 2d117a5) · backend (unreadable note fell through, verified-under before coverage, doubled remote cost; fixed) · lang:rust (`#[non_exhaustive] Verdict`, positional states, `Lookup`, argument order; fixed) · unix (`--explain`, timeout skip, `--quiet` doc; fixed) · architect (one `WRITE` owner of written names, high; fixed).
+- Kept as deliberate (low): CHANGELOG does not repeat that `#[non_exhaustive]` breaks struct-literal construction (no dependent builds a `Verdict`); no existence guard after the conformance test deletes an object (the Rust twin `unwrap`s its delete); `matches!`, `pub(crate) origin_silent` and a loose-object test comment (cosmetic).
+- Carried: greengate prints `Verdict::verified_under` (its Phase 2); "Phase 5 is git-attest 2.0.0" goes into the canonical plan before the 1.9.0 tag.
