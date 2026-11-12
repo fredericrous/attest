@@ -63,7 +63,7 @@ Three steps, once.
 
 ```sh
 ssh-keygen -t ed25519 -N '' -C "$(git config user.email)" -f ~/.ssh/amont-attest
-git config --global amont.attest true
+git config --global greengate.attest true
 ```
 
 **2. Commit the public half** as `.github/allowed_signers` (or
@@ -179,7 +179,7 @@ push access.
 ## Producing attestations
 
 [amont](https://github.com/fredericrous/amont) is the reference producer on a
-laptop: with `amont.attest` enabled it signs a note at `pre-push` naming the
+laptop: with `greengate.attest` enabled it signs a note at `pre-push` naming the
 gates that actually passed. Any tool can produce one — [`SPEC.md`](SPEC.md) is
 the format, and it is short.
 
