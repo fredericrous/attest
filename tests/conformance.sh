@@ -891,6 +891,11 @@ check "bound signer, mismatched platform, --platform any: nothing" "" "$R" --pla
 make_repo "$R" dev@example.org "$WORK/key"
 attach_note "$R" "$(payload_for "$R" "test lint" aarch64-macos)" "$WORK/key"
 check "unbound principal, any platform: unchanged" "test lint" "$R" --platform aarch64-macos
+# One key under an unbound and a bound principal: find-principals answers
+# with both, the unbound one first, and the bound one still refuses.
+make_repo "$R" "dev@example.org,cluster-signer@x86_64-linux" "$WORK/key"
+attach_note "$R" "$(payload_for "$R" "test lint" aarch64-macos)" "$WORK/key"
+check "a key also listed as a bound principal, mismatched platform: nothing" "" "$R" --platform aarch64-macos
 
 # --- the JSON shape the actions publish ------------------------------------
 if [ "${SKIP_JSON:-}" != 1 ]; then

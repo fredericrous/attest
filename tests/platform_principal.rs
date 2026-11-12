@@ -130,43 +130,43 @@ const REFUSAL: &str =
 
 #[test]
 fn a_bound_principal_covers_its_own_platform() {
-    let f = Fixture::new("own", "cluster-signer@x86_64-linux");
-    f.attest("x86_64-linux");
-    let (gates, trail) = f.covered(None, &[]);
+    let fixture = Fixture::new("own", "cluster-signer@x86_64-linux");
+    fixture.attest("x86_64-linux");
+    let (gates, trail) = fixture.covered(None, &[]);
     assert_eq!(gates, ["test", "lint"], "{trail}");
 }
 
 #[test]
 fn a_bound_principal_covers_nothing_on_another_platform() {
-    let f = Fixture::new("other", "cluster-signer@x86_64-linux");
-    f.attest("aarch64-macos");
-    let (gates, trail) = f.covered(None, &[]);
+    let fixture = Fixture::new("other", "cluster-signer@x86_64-linux");
+    fixture.attest("aarch64-macos");
+    let (gates, trail) = fixture.covered(None, &[]);
     assert!(gates.is_empty(), "{trail}");
     assert!(trail.contains(REFUSAL), "{trail}");
 }
 
 #[test]
 fn the_anywhere_list_does_not_admit_a_refused_block() {
-    let f = Fixture::new("anywhere", "cluster-signer@x86_64-linux");
-    f.attest("aarch64-macos");
-    let (gates, trail) = f.covered(Some("x86_64-linux"), &["lint"]);
+    let fixture = Fixture::new("anywhere", "cluster-signer@x86_64-linux");
+    fixture.attest("aarch64-macos");
+    let (gates, trail) = fixture.covered(Some("x86_64-linux"), &["lint"]);
     assert!(gates.is_empty(), "{trail}");
     assert!(trail.contains(REFUSAL), "{trail}");
 }
 
 #[test]
 fn an_unbound_principal_is_unchanged() {
-    let f = Fixture::new("unbound", "dev@example.org");
-    f.attest("aarch64-macos");
-    let (gates, trail) = f.covered(None, &[]);
+    let fixture = Fixture::new("unbound", "dev@example.org");
+    fixture.attest("aarch64-macos");
+    let (gates, trail) = fixture.covered(None, &[]);
     assert_eq!(gates, ["test", "lint"], "{trail}");
 }
 
 #[test]
 fn a_bound_signer_with_no_platform_line_covers_nothing() {
-    let f = Fixture::new("noplatform", "cluster-signer@x86_64-linux");
-    f.attest_payload("");
-    let (gates, trail) = f.covered(None, &[]);
+    let fixture = Fixture::new("noplatform", "cluster-signer@x86_64-linux");
+    fixture.attest_payload("");
+    let (gates, trail) = fixture.covered(None, &[]);
     assert!(gates.is_empty(), "{trail}");
     assert!(trail.contains("missing a required field"), "{trail}");
 }
@@ -185,10 +185,39 @@ fn the_refusal_for_a_block_with_no_platform_reads_names_no_platform() {
 }
 
 #[test]
+fn sign_verify_refuses_a_bound_signer_payload_with_no_platform() {
+    // The scan refuses a block with no platform as malformed before it
+    // verifies anything, so only a library caller of `sign::verify` reaches
+    // the PlatformBound { platform: None } branch: call it directly.
+    let fixture = Fixture::new("libnoplatform", "cluster-signer@x86_64-linux");
+    fixture.attest_payload("");
+    let payload = std::fs::read_to_string(fixture.dir.join("payload")).unwrap();
+    let signature = std::fs::read_to_string(fixture.dir.join("payload.sig")).unwrap();
+    let verdict = git_attest::sign::verify(
+        "amont-attest",
+        &payload,
+        signature.trim_end(),
+        &fixture.dir.join("allowed_signers"),
+        None,
+    );
+    match verdict {
+        Err(git_attest::sign::Error::PlatformBound {
+            ref signer,
+            ref bound,
+            platform: None,
+        }) => {
+            assert_eq!(signer, "cluster-signer@x86_64-linux");
+            assert_eq!(bound, "x86_64-linux");
+        }
+        other => panic!("expected PlatformBound with no platform, got {other:?}"),
+    }
+}
+
+#[test]
 fn an_explicit_bound_principal_is_checked() {
-    let f = Fixture::new("explicit", "cluster-signer@x86_64-linux");
-    f.attest("aarch64-macos");
-    let (gates, trail) = f.covered_as(Some("cluster-signer@x86_64-linux"), None, &[]);
+    let fixture = Fixture::new("explicit", "cluster-signer@x86_64-linux");
+    fixture.attest("aarch64-macos");
+    let (gates, trail) = fixture.covered_as(Some("cluster-signer@x86_64-linux"), None, &[]);
     assert!(gates.is_empty(), "{trail}");
     assert!(trail.contains(REFUSAL), "{trail}");
     let matching = Fixture::new("explicit-ok", "cluster-signer@x86_64-linux");
@@ -201,9 +230,9 @@ fn an_explicit_bound_principal_is_checked() {
 fn every_principal_of_the_key_is_checked() {
     // One allowed_signers line listing both principals: ssh-keygen answers
     // with each of them, the unbound one first.
-    let f = Fixture::new("both", "dev@example.org,cluster-signer@x86_64-linux");
-    f.attest("aarch64-macos");
-    let (gates, trail) = f.covered(None, &[]);
+    let fixture = Fixture::new("both", "dev@example.org,cluster-signer@x86_64-linux");
+    fixture.attest("aarch64-macos");
+    let (gates, trail) = fixture.covered(None, &[]);
     assert!(gates.is_empty(), "{trail}");
     assert!(trail.contains(REFUSAL), "{trail}");
 }

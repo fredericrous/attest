@@ -800,7 +800,7 @@ kept_gates() {
 # HEAD, whichever note it appears in).
 covered=; seen=; seen_blocks=; tried=; verifications=0; exhausted=
 judge_note() {
-    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here
+    local nref=$1 object=$2 at=$3 note_oid body ranges nblocks n ps pe ss se where payload tree gates ran_on signer bh kept how accepted canon_ok claimed here every_principal bound_refusal candidate bound
     [ -z "$exhausted" ] || return 0
     note_oid=$(git notes --ref "$nref" list "$object" 2> /dev/null) || return 0
     note_oid=${note_oid%% *}
