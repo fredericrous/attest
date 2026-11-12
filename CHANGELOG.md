@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Platform-bound signer principals.** A principal ending in
+  `@<arch>-<os>` (arch `x86_64` or `aarch64`; os `linux`, `macos` or
+  `windows`) may sign only blocks whose `platform` is that platform;
+  `sign::verify` refuses any other with a new `sign::Error::PlatformBound`.
+  Other principals are unchanged. See SPEC.md, "Platform-bound principals".
+
 ## 1.7.0
 
 - **The actions run the binary** (decisions ADR-0037). `action.yml` runs

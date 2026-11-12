@@ -1047,3 +1047,22 @@ fn check_coverage_answers_every_way_a_declaration_falls_short() {
         let _ = std::fs::remove_dir_all(&repo);
     }
 }
+
+#[test]
+fn bound_platform_reads_only_a_closed_arch_and_os_after_the_last_at() {
+    for (principal, bound) in [
+        ("cluster-signer@x86_64-linux", Some("x86_64-linux")),
+        ("n@aarch64-macos", Some("aarch64-macos")),
+        ("n@x86_64-windows", Some("x86_64-windows")),
+        ("zougi.fr@gmail.com", None),
+        ("ci@relais", None),
+        ("ci@amont", None),
+        ("dev@my-corp.io", None),
+        ("x@riscv64-linux", None),
+        ("x@x86_64-freebsd", None),
+        ("x@x86_64-linux-gnu", None),
+        ("no-at-sign", None),
+    ] {
+        assert_eq!(bound_platform(principal), bound, "{principal}");
+    }
+}

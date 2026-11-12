@@ -82,6 +82,12 @@ pub enum Error {
     UnknownSigner { signers: PathBuf },
     /// `ssh-keygen -Y verify` refused it.
     DoesNotVerify { signer: String, signers: PathBuf },
+    /// The signer is bound to one platform and the block claims another.
+    PlatformBound {
+        signer: String,
+        bound: String,
+        platform: String,
+    },
     /// `ssh-keygen -y` cannot load the private key unencrypted.
     KeyUnusable,
     /// The key loads but is not ed25519, the one type whose signatures are
@@ -105,6 +111,14 @@ impl std::fmt::Display for Error {
                 "signature does not verify as {signer} against {}",
                 signers.display()
             ),
+            Error::PlatformBound {
+                signer,
+                bound,
+                platform,
+            } => write!(
+                f,
+                "{signer} may sign only {bound} blocks; this block is {platform}"
+            ),
             Error::KeyUnusable => write!(
                 f,
                 "not a usable unencrypted OpenSSH private key (passphrase-protected? a .pub pasted by mistake?)"
@@ -121,7 +135,9 @@ impl std::error::Error for Error {}
 
 /// `ssh-keygen -Y verify` over the exact signed bytes, in `namespace`, as
 /// `principal` — or, when none is given, as whoever the signature says. `Ok`
-/// carries the identity the signature verified as.
+/// carries the identity the signature verified as. A signer whose principal
+/// is platform-bound (`format::bound_platform`) is refused for a payload whose
+/// `platform` field is absent or differs.
 pub fn verify(
     namespace: &str,
     payload: &str,
@@ -157,6 +173,16 @@ pub fn verify(
     })()
     .unwrap_or(false);
     if ok {
+        if let Some(bound) = crate::format::bound_platform(&signer) {
+            let platform = crate::format::field(payload, "platform");
+            if platform != Some(bound) {
+                return Err(Error::PlatformBound {
+                    bound: bound.to_string(),
+                    platform: platform.unwrap_or("none").to_string(),
+                    signer,
+                });
+            }
+        }
         Ok(signer)
     } else {
         Err(Error::DoesNotVerify {

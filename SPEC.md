@@ -225,6 +225,19 @@ of editing a workflow file, no more — but repositories that guard
 `allowed_signers` the same way — and `attest-inputs` too, once it exists
 (see "Input fingerprints").
 
+#### Platform-bound principals
+
+A principal whose text after its last `@` is `<arch>-<os>` is bound to that
+platform: `arch` is one of `x86_64`, `aarch64` and `os` one of `linux`,
+`macos`, `windows` (`cluster-signer@x86_64-linux`). Once its signature
+verifies, a block whose payload `platform` field is absent or differs from the
+bound platform is refused, whatever the verifier requires and whether or not a
+gate is listed in `anywhere`; the reason reads `<principal> may sign only
+<platform> blocks; this block is <platform>` (`none` when the payload has no
+platform). Every other principal, including `ci@relais`, an email address and
+a suffix outside those sets (`x@x86_64-linux-gnu`, `x@riscv64-linux`), is
+unbound and behaves exactly as before.
+
 ### Input fingerprints
 
 An attestation keyed by the root tree dies with any change anywhere: a docs
