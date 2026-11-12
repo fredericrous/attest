@@ -28,11 +28,11 @@ test: ## unit tests
 conformance: ## run the fixtures against both implementations
 	cargo build --release
 	@echo "--- verify.sh ---"
-	@./tests/conformance.sh "bash $(PWD)/verify.sh --quiet"
+	@./tests/conformance.sh "bash $(CURDIR)/verify.sh --quiet"
 	@echo "--- git-attest ---"
-	@./tests/conformance.sh "$(PWD)/target/release/git-attest covered"
+	@./tests/conformance.sh "$(CURDIR)/target/release/git-attest covered"
 	@echo "--- legacy.sh (negative control: MUST fail) ---"
-	@if SKIP_JSON=1 ./tests/conformance.sh "bash $(PWD)/tests/legacy.sh" > /dev/null 2>&1; then \
+	@if SKIP_JSON=1 ./tests/conformance.sh "bash $(CURDIR)/tests/legacy.sh" > /dev/null 2>&1; then \
 	    echo "  ✗ legacy.sh PASSED the suite — the fixtures no longer prove anything"; \
 	    exit 1; \
 	else \
@@ -54,50 +54,50 @@ endef
 
 compat: ## prove released verifiers degrade safely on newer notes
 	@echo "--- multi-block notes: verify.sh 1.1.0 (frozen copy) ---"
-	@./tests/compat.sh "bash $(PWD)/tests/compat/verify-1.1.0.sh --quiet"
+	@./tests/compat.sh "bash $(CURDIR)/tests/compat/verify-1.1.0.sh --quiet"
 	@echo "--- multi-block notes: git-attest 1.1.0 (built from the tag) ---"
 	$(call build_tag,v1.1.0)
-	@./tests/compat.sh "$(PWD)/target/compat/v1.1.0/target/release/git-attest covered"
+	@./tests/compat.sh "$(CURDIR)/target/compat/v1.1.0/target/release/git-attest covered"
 	@echo "--- input lines: verify.sh 1.1.0 (frozen copy) ---"
-	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.1.0.sh --quiet" old
+	@./tests/compat-fields.sh "bash $(CURDIR)/tests/compat/verify-1.1.0.sh --quiet" old
 	@echo "--- input lines: git-attest 1.1.0 ---"
-	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.1.0/target/release/git-attest covered" old
+	@./tests/compat-fields.sh "$(CURDIR)/target/compat/v1.1.0/target/release/git-attest covered" old
 	@echo "--- input lines: verify.sh 1.2.0 (frozen copy) ---"
-	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.2.0.sh --quiet" old
+	@./tests/compat-fields.sh "bash $(CURDIR)/tests/compat/verify-1.2.0.sh --quiet" old
 	@echo "--- input lines: git-attest 1.2.0 (built from the tag) ---"
 	$(call build_tag,v1.2.0)
-	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.2.0/target/release/git-attest covered" old
+	@./tests/compat-fields.sh "$(CURDIR)/target/compat/v1.2.0/target/release/git-attest covered" old
 	@echo "--- optional paths: verify.sh 1.3.1 (frozen copy) ---"
-	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.3.1.sh --quiet" fp13
+	@./tests/compat-fields.sh "bash $(CURDIR)/tests/compat/verify-1.3.1.sh --quiet" fp13
 	@echo "--- optional paths: git-attest 1.3.1 (built from the tag) ---"
 	$(call build_tag,v1.3.1)
-	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.3.1/target/release/git-attest covered" fp13
+	@./tests/compat-fields.sh "$(CURDIR)/target/compat/v1.3.1/target/release/git-attest covered" fp13
 	@echo "--- canonical tree: verify.sh 1.4.1 (frozen copy) ---"
-	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.4.1.sh --quiet" fp14
+	@./tests/compat-fields.sh "bash $(CURDIR)/tests/compat/verify-1.4.1.sh --quiet" fp14
 	@echo "--- canonical tree: git-attest 1.4.1 (built from the tag) ---"
 	$(call build_tag,v1.4.1)
-	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.4.1/target/release/git-attest covered" fp14
+	@./tests/compat-fields.sh "$(CURDIR)/target/compat/v1.4.1/target/release/git-attest covered" fp14
 	@echo "--- the opt-out directive: verify.sh 1.5.1 (frozen copy) ---"
-	@./tests/compat-fields.sh "bash $(PWD)/tests/compat/verify-1.5.1.sh --quiet" fp15
+	@./tests/compat-fields.sh "bash $(CURDIR)/tests/compat/verify-1.5.1.sh --quiet" fp15
 	@echo "--- the opt-out directive: git-attest 1.5.1 (built from the tag) ---"
 	$(call build_tag,v1.5.1)
-	@./tests/compat-fields.sh "$(PWD)/target/compat/v1.5.1/target/release/git-attest covered" fp15
+	@./tests/compat-fields.sh "$(CURDIR)/target/compat/v1.5.1/target/release/git-attest covered" fp15
 	@echo "--- input lines: current verify.sh ---"
-	@./tests/compat-fields.sh "bash $(PWD)/verify.sh --quiet" new
+	@./tests/compat-fields.sh "bash $(CURDIR)/verify.sh --quiet" new
 	@echo "--- input lines: current git-attest ---"
 	@cargo build -q --release
-	@./tests/compat-fields.sh "$(PWD)/target/release/git-attest covered" new
+	@./tests/compat-fields.sh "$(CURDIR)/target/release/git-attest covered" new
 
 sign-test: ## the producer's fixtures (sign/sign.sh and git-attest sign against a bare origin), read back by both verifiers
 	cargo build --release
 	@echo "--- sign/sign.sh, read by verify.sh ---"
-	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ./tests/sign.sh
+	@ATTEST_GIT_ATTEST="$(CURDIR)/target/release/git-attest" ./tests/sign.sh
 	@echo "--- sign/sign.sh, read by git-attest ---"
-	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_IMPL="$(PWD)/target/release/git-attest covered" ./tests/sign.sh
+	@ATTEST_GIT_ATTEST="$(CURDIR)/target/release/git-attest" ATTEST_IMPL="$(CURDIR)/target/release/git-attest covered" ./tests/sign.sh
 	@echo "--- git-attest sign, read by verify.sh ---"
-	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_SIGN="$(PWD)/target/release/git-attest sign" ./tests/sign.sh
+	@ATTEST_GIT_ATTEST="$(CURDIR)/target/release/git-attest" ATTEST_SIGN="$(CURDIR)/target/release/git-attest sign" ./tests/sign.sh
 	@echo "--- git-attest sign, read by git-attest ---"
-	@ATTEST_GIT_ATTEST="$(PWD)/target/release/git-attest" ATTEST_SIGN="$(PWD)/target/release/git-attest sign" ATTEST_IMPL="$(PWD)/target/release/git-attest covered" ./tests/sign.sh
+	@ATTEST_GIT_ATTEST="$(CURDIR)/target/release/git-attest" ATTEST_SIGN="$(CURDIR)/target/release/git-attest sign" ATTEST_IMPL="$(CURDIR)/target/release/git-attest covered" ./tests/sign.sh
 
 fetch-test: ## fetch.sh against a release served from file://, RELEASE's shape, the deprecation lines
 	@./tests/fetch.sh
