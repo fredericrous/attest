@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0
 
 - **Platform-bound signer principals.** A principal ending in
   `@<arch>-<os>` (arch `x86_64` or `aarch64`; os `linux`, `macos` or
