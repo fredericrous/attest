@@ -228,8 +228,11 @@ list, is a claim inside the payload, and only a verified payload may make
 one.
 
 ```
-you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
+you@example.com namespaces="amont-attest,greengate-attest" ssh-ed25519 AAAAC3Nza…
 ```
+
+Both namespaces during the window (see "Names"); `greengate-attest` alone after
+the census.
 
 ### Platform
 
