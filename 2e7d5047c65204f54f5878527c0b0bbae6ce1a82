@@ -1,0 +1,15 @@
+greengate-attest-v2
+tree ab48c0f8221f81dedcac381ffe9dacedb6d3c45d
+gates ci-fmt ci-clippy
+platform x86_64-linux
+input ci-fmt 2d19af9b2b8cca85f5c999d705a97ab8f8d9f61a
+input ci-clippy 07939441d9f5fd82f2aa2b39dcaebaf9d15ff975
+canon d73f40a0c8fd164ff05c558405424c5446c7714f
+greengate attest-sign
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgISqqVE8csJZGVEMH5J21/VFM+8
+FMdSDMZZU7cr8UQwUAAAAQZ3JlZW5nYXRlLWF0dGVzdAAAAAAAAAAGc2hhNTEyAAAAUwAA
+AAtzc2gtZWQyNTUxOQAAAECm5hqj9IntodM6rR5KXpcPFLguWOE3FXLpKk1lOdZbWMz8kK
+tc5RXM2grCKRyCIFLNIYUxw6qhgL67x+G72WQC
+-----END SSH SIGNATURE-----
