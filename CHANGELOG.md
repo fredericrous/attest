@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.10.0
+
 - **Writers switch to the `greengate-attest` names** (decisions ADR-0068,
   plan greengate-signs-notes-under-green-names, Phase 4). `format::WRITE` is
   now `format::GREEN`, so `FORMAT`, `NOTES_REF`, `INPUTS_REF`, `NAMESPACE`,
