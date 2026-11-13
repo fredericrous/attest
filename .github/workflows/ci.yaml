@@ -187,8 +187,8 @@ jobs:
           [ -z "${{ steps.bare.outputs.covered }}" ] || {
             echo "expected empty covered"; exit 1; }
           # Both name sets are absent on this origin. The `release` leg runs
-          # the pinned 1.8.0, which has no legacy_notes key and reports the
-          # amont ref as notes: hence the fallback.
+          # the pinned release (RELEASE), which may predate the legacy_notes
+          # key and report the amont ref as notes: hence the fallback.
           [ '${{ steps.bare.outputs.notes }}' = absent ] || {
             echo 'expected notes=absent, got ${{ steps.bare.outputs.notes }}'; exit 1; }
           [ '${{ steps.bare.outputs.legacy_notes || steps.bare.outputs.notes }}' = absent ] || {
@@ -364,8 +364,11 @@ jobs:
           set -eu
           [ '${{ steps.fpsign.outputs.inputs }}' = 1/1 ] || { echo 'inputs: ${{ steps.fpsign.outputs.inputs }}'; exit 1; }
           tree=$(git rev-parse 'HEAD^{tree}')
-          # The pinned release leg wrote the amont names; every other leg, the green.
-          if [ "${{ matrix.binary }}" = release ]; then src=amont; else src=greengate; fi
+          # Every leg but `release` writes the green names; the pinned release
+          # writes whichever set its version writes (amont before 1.10.0).
+          if [ "${{ matrix.binary }}" != release ]; then src=greengate
+          elif git notes --ref attest-local/greengate-attest show "$tree" > /dev/null 2>&1; then src=greengate
+          else src=amont; fi
           git notes --ref "attest-local/$src-attest" show "$tree" | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
           echo unrelated > UNRELATED.md && git add UNRELATED.md && git commit -qm unrelated
       - id: fpmoved
