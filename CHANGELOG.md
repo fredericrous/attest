@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- **Writers switch to the `greengate-attest` names** (decisions ADR-0068,
+  plan greengate-signs-notes-under-green-names, Phase 4). `format::WRITE` is
+  now `format::GREEN`, so `FORMAT`, `NOTES_REF`, `INPUTS_REF`, `NAMESPACE`,
+  `payload`'s producer word, `fingerprint::key` / `canon_key` and their
+  preimages, and `notes::sync_mirrors` give the green names. `git-attest
+  sign`, `sign/sign.sh` (and the `./sign` action) and every dependent that
+  signs with these constants write a `greengate-attest-v2` block with a
+  `greengate <producer>` line, signed `-n greengate-attest`, into
+  `refs/notes/greengate-attest` and `refs/notes/greengate-attest-inputs`
+  under the green key domains; `--no-push` keeps it in
+  `refs/notes/attest-local/greengate-attest[-inputs]`. Nothing writes an
+  `amont-attest` note any more.
+- **What an upgrader sees.** Verifying is unchanged: both name sets are read
+  (green first) until 2.0.0, so `amont-attest` notes signed by 1.9 and
+  earlier keep skipping during the 30-day window. A signer's
+  `allowed_signers` line must list `greengate-attest`
+  (`namespaces="amont-attest,greengate-attest"` during the window), or its
+  new notes do not verify and the gates run. Verifiers before 1.9.0 read
+  only `refs/notes/amont-attest`, so they do not see new notes and run
+  everything. After signing, a workflow reads the new notes' state as
+  `notes` / `inputs_notes` (not `legacy_notes`), and an inspection of the
+  unpushed block reads `refs/notes/attest-local/greengate-attest`.
+- **A green note hides its object's legacy blocks.** A tree signed by both a
+  1.9 `sign@v1` and a Phase 4 laptop runs its suite until CI also signs green,
+  because the green note wins for its object. `v1` moves to 1.10.0 in the same
+  step as the laptop's Phase 4 install. Until then the old notes verify as before.
+- **Caret hazard for dependents.** A caret `1.9` pin resolves 1.10 on any build
+  without `--locked`, or after `cargo update`, and its attest writes then switch
+  to green before its own switch. Dependents pin `~1.9` until they take the
+  writer switch, then `1.10`.
+- The remote waits: per-set syncs mean up to about 6 × `REMOTE_BUDGET` (90 s)
+  on a slow but answering origin (SPEC.md, origin's mirror).
+- `sign/sign.sh` names its whole set in one block at the top (header, refs,
+  namespace, both key domains, producer word); the canonical-key function it
+  shares with `verify.sh` now takes the domain of the set in force.
+- `tests/compat/sign-1.9.0.sh` is the 1.9.0 signer; `tests/sign.sh` proves a
+  block it signs is still covered.
+
 ## 1.9.0
 
 - **Verifiers read both note names** (decisions ADR-0068, plan

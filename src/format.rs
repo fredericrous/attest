@@ -1,8 +1,8 @@
 //! The attestation format: the payload's fields, the note's blocks, and the
 //! names every producer and verifier shares (SPEC.md, "The note").
 
-/// First token of every payload (the LEGACY name until Phase 4 of ADR-0068's
-/// plan; see [`WRITE`]). A verifier that does not recognise this
+/// First token of every payload written (the GREEN name since 1.10.0; see
+/// [`WRITE`]; the LEGACY one is still read). A verifier that does not recognise this
 /// string must treat the note as absent: an unknown version may mean anything,
 /// and "run the tests" is the only safe reading of anything.
 pub const FORMAT: &str = WRITE.format;
@@ -49,8 +49,8 @@ pub struct Names {
     pub producer: &'static str,
 }
 
-/// The names notes have been written under since 1.0, and still are until
-/// [`WRITE`] becomes [`GREEN`] in Phase 4. Removed at the census.
+/// The names notes were written under from 1.0 to 1.9. Still read during the
+/// 30-day window (ADR-0068); removed at the census (2.0.0).
 pub const LEGACY: Names = Names {
     format: "amont-attest-v2",
     notes_ref: "amont-attest",
@@ -61,7 +61,7 @@ pub const LEGACY: Names = Names {
     producer: "amont",
 };
 
-/// The names notes are signed under from Phase 4. Verifiers read them first
+/// The names notes are signed under since 1.10.0. Verifiers read them first
 /// and fall back to [`LEGACY`] (SPEC.md, "Names").
 pub const GREEN: Names = Names {
     format: "greengate-attest-v2",
@@ -76,12 +76,11 @@ pub const GREEN: Names = Names {
 /// The ONE owner of what is written: [`FORMAT`], [`NOTES_REF`],
 /// [`INPUTS_REF`], [`NAMESPACE`], the producer word of [`payload`] and the
 /// set-less functions (`fingerprint::key`, `canon_key`, their preimages,
-/// `notes::sync_mirrors`) all derive from it. LEGACY until Phase 4, which
-/// changes this line to `GREEN`, together with the four name assignments in
-/// `sign/sign.sh` (held equal to these by `tests/sign.sh`): a dependent
-/// signing with the constants (greengate, through a caret pin) cannot write
-/// the new names earlier.
-pub const WRITE: Names = LEGACY;
+/// `notes::sync_mirrors`) all derive from it. [`GREEN`] since 1.10.0 (LEGACY
+/// before), together with the name assignments at the top of `sign/sign.sh`,
+/// held equal to these by `tests/sign.sh`, which reads back what both
+/// signers write.
+pub const WRITE: Names = GREEN;
 
 /// How many blocks of one note are read. Every block costs two `ssh-keygen`
 /// runs, and the notes ref is writable by anyone with push access.

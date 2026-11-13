@@ -13,7 +13,7 @@ Pointer plan. The canonical plan (see `canonical` above) moves every signed-note
 ## Phases (this repository)
 
 - [x] Phase 1 — git-attest reads both, writes old (commits 9e8ff62, 9f7224f). `fetch.sh` needed no change: it names no notes ref.
-- [ ] Phase 4 — writers switch (`format::WRITE` becomes `GREEN`).
+- [ ] Phase 4 — writers switch (`format::WRITE` becomes `GREEN`). Implemented on `feat/notes-writers-green` for 1.10.0: `sign/sign.sh` names its whole set at the top (header, refs, namespace, both domains, producer word), the shared canon block's `canon_key` takes `$CANON_DOMAIN`; ticked at the release.
 - [ ] Phase 5 — census: the legacy reads go.
 
 ## Verification
@@ -36,6 +36,19 @@ Phase 1, input → expected → actual:
 
 After the release (not pending here): the CI action on a scratch repository verifies a 1.8.0-signed note.
 
+Phase 4, input → expected → actual:
+
+| check | input | expected | actual |
+|---|---|---|---|
+| `git-attest sign` writes only green | `tests/names.rs` `git_attest_sign_writes_only_the_green_names`, `git_attest_sign_no_push_writes_the_green_local_refs` | origin has only `refs/notes/greengate-attest[-inputs]`; header `greengate-attest-v2`, `greengate attest-sign`; inputs note under the GREEN key; signers listing `greengate-attest` alone verify it, `verified under greengate-attest`; `--no-push` writes `attest-local/greengate-attest[-inputs]` | pass |
+| `sync_mirrors` follows the written set | `sync_mirrors_touches_only_the_green_refs` | GREEN mirror deleted, LEGACY one kept | pass |
+| constants and keys | `the_constants_are_the_green_names`, `each_set_keys_its_lookups_under_its_own_domain`, `key_preimage_is_exact`, `the_written_keys_are_the_green_known_answers` (keys from `git hash-object`, sha1 and sha256) | GREEN values | pass |
+| `sign.sh` and `git-attest sign` write the same green set | `tests/sign.sh` read-backs (the first case asserts the refs, header and producer word), all four signer × verifier pairs | 0 failed | 157/157/156/156 |
+| a 1.9-signed note still verifies | `tests/sign.sh`: `tests/compat/sign-1.9.0.sh` (v1.9.0's `sign/sign.sh`) signs, a fresh clone is covered; `an_amont_note_is_verified_and_named` | LEGACY refs on origin; covered | pass |
+| full suite | `make check` | 0 failed | conformance 260/260, 252/252; compat all pass; sign-test as above; fetch-test 24/24; exit 0 |
+| the tests fail without the change | the same tests on `origin/main` + this diff with `WRITE = LEGACY` and the old `sign/sign.sh` | the write-path tests fail | `cargo test`: 9 failed (4 lib, 5 `names.rs`); `tests/sign.sh` (sign.sh, verify.sh): 37 failures in the first part, run stopped there |
+| the CI `action` job | its steps 2–6 replayed locally with the built binary (green signer) and `sign-1.9.0.sh` (the `release` leg's LEGACY signer) | every assertion holds | pass, both; not run on CI here |
+
 ## Decision log
 
 - 2026-11-12 — the ref a note sits in picks the name set, and the header of each block must match it: stricter than "the header decides". A green header found under the old ref (or an old header under the new ref) is refused, never re-read under the other set.
@@ -47,3 +60,16 @@ After the release (not pending here): the CI action on a scratch repository veri
 - Phase 1, round 1 then two deltas, all approve on tree f9129a4f: implementation-review (round 1 approve-with-changes: plan record, output parameter, flag argument, single-letter names; fixed in 9f7224f and 2d117a5) · backend (unreadable note fell through, verified-under before coverage, doubled remote cost; fixed) · lang:rust (`#[non_exhaustive] Verdict`, positional states, `Lookup`, argument order; fixed) · unix (`--explain`, timeout skip, `--quiet` doc; fixed) · architect (one `WRITE` owner of written names, high; fixed).
 - Kept as deliberate (low): CHANGELOG does not repeat that `#[non_exhaustive]` breaks struct-literal construction (no dependent builds a `Verdict`); no existence guard after the conformance test deletes an object (the Rust twin `unwrap`s its delete); `matches!`, `pub(crate) origin_silent` and a loose-object test comment (cosmetic).
 - Carried: greengate prints `Verdict::verified_under` (its Phase 2); "Phase 5 is git-attest 2.0.0" goes into the canonical plan before the 1.9.0 tag.
+
+## Implementation review (Phase 4, writers switch)
+
+- implementation-review: approve-with-changes ×2, then approve (084b9d90).
+  - Fixed: the `repo_dir` / `sixty_four_hex_a` names.
+  - The caret hazard is named in the CHANGELOG and SPEC: dependents pin `~1.9` until their writer switch.
+  - Bare-constant readers are greengate's: about 40 uses are listed for its Phase 4 PR, which bumps its pin.
+- backend: approve-with-changes ×2, then approve.
+  - Kept as reviewed: a note is read whole under one name and the green note wins. A green note hides its object's legacy blocks, so `v1` moves to 1.10.0 with the laptop's Phase 4 install (stated in the CHANGELOG and SPEC).
+  - CI requires green writes off the `release` leg, which picks its name set by its note.
+- lang:rust: approve-with-changes, then approve. Fixed: a Drop guard, a slice pattern, the inputs mirror asserted, and a real canon-key check.
+- unix: approve. The worst-case remote wait (about 90 s) is documented.
+- architect: approve-with-changes, then approve. The decisions plan record will carry the rollback (yank 1.10.0, publish 1.10.1 with `WRITE = LEGACY`, beside the `v1` rollback) and the three name-writing files for Phase 5.

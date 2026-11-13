@@ -1,4 +1,4 @@
-# `amont-attest-v2`
+# `greengate-attest-v2` (formerly `amont-attest-v2`)
 
 A signed statement that a named set of checks passed against a specific git
 **tree**, on a specific platform. It exists so CI can skip work a developer's
@@ -8,21 +8,21 @@ This document is the contract. Two implementations in this repository —
 `verify.sh` and `git-attest` — target it, and `tests/conformance.sh` is what
 proves they agree. A third implementation should pass that suite.
 
-## Why the name still says `amont`
+## Why the examples still say `amont`
 
-The format was born inside [amont](https://github.com/fredericrous/amont),
-which is still the only producer. The identifiers are **frozen**, not
-aspirational: renaming them would orphan every note already signed, every
-`allowed_signers` entry already pinned to the namespace, and every workflow
-already deployed — to make a string prettier. Read `amont-` as a version
-prefix that happens to be a word.
+The format was born inside [amont](https://github.com/fredericrous/amont), now
+greengate, under `amont-attest` names that were long held frozen. Since
+1.10.0 every producer writes the `greengate-attest` names instead (next
+section); the `amont-attest` notes already signed keep verifying for a
+30-day window, then a census retires them. The examples below keep the
+`amont-attest` spelling they were written in.
 
 ## Names: `greengate-attest` and the older `amont-attest`
 
-Two complete name sets exist (decisions ADR-0068, which replaces the "frozen
-forever" reading above):
+Two complete name sets exist (decisions ADR-0068, which replaces the old
+"frozen forever" reading):
 
-| | LEGACY (written today) | GREEN (verified now, written from the writer switch) |
+| | LEGACY (written through 1.9, still read) | GREEN (written since 1.10.0, read first) |
 |---|---|---|
 | format header | `amont-attest-v2` | `greengate-attest-v2` |
 | notes ref | `refs/notes/amont-attest` | `refs/notes/greengate-attest` |
@@ -33,7 +33,11 @@ forever" reading above):
 | producer line | `amont <producer>` | `greengate <producer>` |
 
 Everything in this document that names an `amont-attest` string describes the
-LEGACY set; read it as "the set the note was written under".
+LEGACY set; read it as "the set the note was written under". A producer since
+1.10.0 writes the GREEN spelling of each: the `greengate-attest-v2` header, the
+`greengate <producer>` line, `-n greengate-attest`, the GREEN key domains, and
+`refs/notes/greengate-attest[-inputs]` (`refs/notes/attest-local/greengate-attest[-inputs]`
+for an unpushed block).
 
 - **Reading order.** A verifier reads the GREEN ref first, and the LEGACY ref
   only for an object (a tree, a commit, an input-fingerprint key, a canonical
@@ -62,13 +66,25 @@ LEGACY set; read it as "the set the note was written under".
   still a note: the other set is not read for that object. The
   action reports the GREEN refs' state as `notes` and `inputs_notes`, the
   LEGACY refs' as `legacy_notes` and `legacy_inputs_notes`.
-- **The window.** Writers still write the LEGACY set; they switch to GREEN in a
-  later release (Phase 4 of the plan). From the day that release is installed,
-  both sets verify for 30 days (ADR-0068); after it a census removes the LEGACY
-  reads, the `amont-attest` signer namespaces and the LEGACY refs on every
-  remote. In this release the Rust constants (`format::FORMAT`, `NOTES_REF`,
-  `INPUTS_REF`, `NAMESPACE`) still equal `format::LEGACY`, so a dependent that
-  signs with them keeps writing LEGACY; `format::GREEN` holds the new names.
+- **The window.** Writers write the GREEN set since 1.10.0 (`git-attest sign`,
+  `sign/sign.sh`, and every dependent that signs with the Rust constants
+  `format::FORMAT`, `NOTES_REF`, `INPUTS_REF`, `NAMESPACE`, which equal
+  `format::GREEN`; `format::WRITE` is the one owner). Nothing writes the LEGACY
+  set any more. From the day that release is installed, both sets verify for
+  30 days (ADR-0068); after it a census (2.0.0) removes the LEGACY reads, the
+  `amont-attest` signer namespaces and the LEGACY refs on every remote. A
+  signer must be listed with `namespaces="greengate-attest"` (both, during the
+  window) for its new notes to verify: a verifier that cannot verify one runs
+  the gate, as for any absent note.
+- **A green note hides its object's legacy blocks.** A note is read whole under
+  one name set, and the green note wins for its object. So a tree signed by both
+  a 1.9 `sign@v1` and a Phase 4 laptop runs its suite until CI also signs green.
+  `v1` therefore moves to 1.10.0 in the same step as the laptop's Phase 4
+  install. Until then the old notes verify as before.
+- **The caret hazard.** A dependent with a caret `1.9` pin resolves 1.10 on any
+  build without `--locked`, or after `cargo update`, and its attest writes switch
+  to green before its own switch. Dependents pin `~1.9` until they take the
+  writer switch, then `1.10`.
 
 ## The note
 
@@ -221,8 +237,11 @@ list, is a claim inside the payload, and only a verified payload may make
 one.
 
 ```
-you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
+you@example.com namespaces="amont-attest,greengate-attest" ssh-ed25519 AAAAC3Nza…
 ```
+
+Both namespaces during the window (see "Names"); `greengate-attest` alone after
+the census.
 
 ### Platform
 
@@ -554,7 +573,9 @@ got an answer: an origin that did not answer (a call for the first set timed
 out, or both its refs are `unreachable`) is not asked again, and the second set
 takes the same state, so a silent origin still costs
 one call and a dead one two, in total; an origin that answers costs up to twice
-the figures above (one pair per set). A set origin does not have is `absent`.
+the figures above, one name set after the other: three calls per set, so about
+6 × the 15 s budget (90 s) in all on a slow but answering origin. A set origin
+does not have is `absent`.
 
 **Unpushed blocks** — written by a producer that did not push, such as
 `sign.sh --no-push` — live in `refs/notes/attest-local/amont-attest` and

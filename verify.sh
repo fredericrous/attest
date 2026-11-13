@@ -43,15 +43,13 @@
 # are word-split on purpose; a name like `pre-push-*` next to a file named
 # `pre-push-cargo-test` would otherwise become that file's name and cover a
 # gate nobody signed.
-# canon_key (in the shared canon block) is the legacy-domain key sign.sh uses;
-# this script asks canon_key_of for the name set in force.
 # shellcheck disable=SC2329
 set -uf
 
 # Two complete name sets (SPEC.md, "Names"), read in this order: a note is read
 # WHOLE under one of them, so its header, SSH namespace, inputs ref and
-# fingerprint domains never mix. Phase 1 of the greengate-names plan: writers
-# (sign/sign.sh) still write the legacy set.
+# fingerprint domains never mix. Writers (sign/sign.sh) write the green set
+# since 1.10.0; the legacy set is read until the census (2.0.0).
 SETS="green legacy"
 use_set() { # green | legacy
     case $1 in
@@ -224,6 +222,9 @@ fi
 # EMPTY makes it run none of them. Credential managers are told not to
 # interact; their stored credentials still work. Returns 124 when the deadline
 # cut the call off.
+# Per call. A name set costs up to three calls (SPEC.md, origin's mirror), and
+# the two sets run one after the other: about 6 × REMOTE_BUDGET (90 s) in all
+# on a slow but answering origin.
 REMOTE_BUDGET=15
 remote_git() {
     local ssh_cmd=${GIT_SSH_COMMAND:-}
@@ -396,9 +397,10 @@ for s in $SETS; do
     use_set "$s"
     # An origin that did not answer for the first set will not for the second:
     # asking again would only double the wait.
-    # holds-until: Phase 4 writes greengate refs. Until then origin has no
-    # greengate ref, so the green fetch fails and costs an ls-remote, and the
-    # legacy set is a second fetch.
+    # holds-until: the census (2.0.0) drops the legacy set. Until a
+    # repository's first green note (writers write them since 1.10.0) origin
+    # has no greengate ref, so the green fetch fails and costs an ls-remote,
+    # and the legacy set is a second fetch.
     if [ "$s" = legacy ] && { [ -n "$timed_out" ] || { [ "$st_main_green" = unreachable ] && [ "$st_inputs_green" = unreachable ]; }; }; then
         st_main=unreachable; st_inputs=unreachable
     else
@@ -532,8 +534,9 @@ canon_of() {
     git -C "${root:-.}" hash-object --stdin < "$tmp/canon.txt" 2> /dev/null
 }
 
-# The synthetic note key for canonical fingerprint $1, in the inputs ref.
-canon_key() { printf 'amont-attest-canon %s\n' "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
+# The synthetic note key for canonical fingerprint $1, in the inputs ref, under
+# the name set in force ($CANON_DOMAIN, set by the caller).
+canon_key() { printf '%s %s\n' "$CANON_DOMAIN" "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
 # canon-block:end
 
 # No suffix after the Xs: stock macOS mktemp does not substitute a template
@@ -784,9 +787,6 @@ input_fp() {
 
 # The synthetic note key for (gate, fingerprint).
 input_key() { printf '%s %s %s\n' "$INPUT_DOMAIN" "$1" "$2" | git hash-object --stdin 2> /dev/null; }
-# The same for the canonical fingerprint $1, under the name set in force (the
-# canon-block's own canon_key is the legacy one, kept for sign.sh).
-canon_key_of() { printf '%s %s\n' "$CANON_DOMAIN" "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
 
 # The checked-out tree's canonical fingerprint, memoised in "$tmp/canon.here":
 # the oid, or an empty file when the route is unavailable here (the repository
@@ -1081,7 +1081,7 @@ if [ -z "$exhausted" ]; then
     if [ -n "$c" ]; then
         for s in $SETS; do
             use_refs "$s"
-            k=$(canon_key_of "$c")
+            k=$(canon_key "$c")
             [ -n "$k" ] || continue
             found=
             for r in $REFS_INPUTS; do

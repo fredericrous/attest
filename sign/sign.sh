@@ -5,13 +5,13 @@
 #                [--producer NAME] [--attempts N] [--no-push] [--allow-dirty]
 #                [--github-output] [--quiet]        < private-key
 #
-# Signs an `amont-attest-v2` block over HEAD's tree, APPENDS it to the note on
-# that tree in refs/notes/amont-attest, and pushes the ref — so the next job
+# Signs a `greengate-attest-v2` block over HEAD's tree, APPENDS it to the note
+# on that tree in refs/notes/greengate-attest, and pushes the ref — so the next job
 # that checks out the same tree (a re-run, the push to main after a merge) can
 # skip what this one already ran. `verify.sh` is the other half.
 #
-# With --no-push the block goes to refs/notes/attest-local/amont-attest
-# instead: refs/notes/amont-attest is origin's mirror, and a block origin never
+# With --no-push the block goes to refs/notes/attest-local/greengate-attest
+# instead: refs/notes/greengate-attest is origin's mirror, and a block origin never
 # saw is one origin cannot revoke, so verifiers read it only on request.
 #
 # The private key arrives on STDIN and nowhere else: never argv, which is
@@ -52,10 +52,16 @@
 # and declared paths are word-split on purpose and must stay literal.
 set -uf
 
-FORMAT=amont-attest-v2
-NOTES_REF=amont-attest
-INPUTS_REF=amont-attest-inputs
-NAMESPACE=amont-attest
+# The GREEN name set (SPEC.md, "Names"), since 1.10.0; before, the LEGACY
+# `amont-attest` one. Held equal to git-attest's `format::WRITE` by
+# tests/sign.sh, which reads back what both signers write.
+FORMAT=greengate-attest-v2
+NOTES_REF=greengate-attest
+INPUTS_REF=greengate-attest-inputs
+NAMESPACE=greengate-attest
+INPUT_DOMAIN=greengate-attest-input
+CANON_DOMAIN=greengate-attest-canon
+PRODUCER=greengate
 
 gates=; have_gates=; platform=; object=; remote=origin; producer=attest-sign
 attempts=5; push=1; allow_dirty=; gha=; quiet=
@@ -292,8 +298,9 @@ canon_of() {
     git -C "${root:-.}" hash-object --stdin < "$tmp/canon.txt" 2> /dev/null
 }
 
-# The synthetic note key for canonical fingerprint $1, in the inputs ref.
-canon_key() { printf 'amont-attest-canon %s\n' "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
+# The synthetic note key for canonical fingerprint $1, in the inputs ref, under
+# the name set in force ($CANON_DOMAIN, set by the caller).
+canon_key() { printf '%s %s\n' "$CANON_DOMAIN" "$1" | git -C "${root:-.}" hash-object --stdin 2> /dev/null; }
 # canon-block:end
 
 # ---------------------------------------------------------------------------
@@ -452,14 +459,14 @@ else
 fi
 
 # The payload, in the exact shape SPEC.md gives — the `input` lines after
-# `platform`, then `canon`, before `amont`, in spec order, so a re-run is
+# `platform`, then `canon`, before the producer line, in spec order, so a re-run is
 # byte-identical — then the block: payload, its trailing newline, a blank
 # line, the armored signature.
 {
     printf '%s\ntree %s\ngates %s\nplatform %s\n' "$FORMAT" "$object_tree" "$gates" "$platform"
     while IFS="$(printf '\t')" read -r g fp; do printf 'input %s %s\n' "$g" "$fp"; done < "$tmp/fps"
     [ -z "$canon_oid" ] || printf 'canon %s\n' "$canon_oid"
-    printf 'amont %s\n' "$producer"
+    printf '%s %s\n' "$PRODUCER" "$producer"
 } > "$tmp/p"
 ssh-keygen -Y sign -n "$NAMESPACE" -f "$tmp/key" "$tmp/p" > /dev/null 2>&1 || {
     say "ssh-keygen could not sign"; finish sign-failed false false; }
@@ -543,7 +550,7 @@ publish_local() { # ref object...
 # tree's, when the block carries one.
 input_keys() {
     while IFS="$(printf '\t')" read -r g fp; do
-        printf 'amont-attest-input %s %s\n' "$g" "$fp" | git hash-object --stdin 2> /dev/null
+        printf '%s %s %s\n' "$INPUT_DOMAIN" "$g" "$fp" | git hash-object --stdin 2> /dev/null
     done < "$tmp/fps"
     [ -z "$canon_oid" ] || canon_key "$canon_oid"
 }

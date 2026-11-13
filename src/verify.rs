@@ -547,9 +547,10 @@ pub fn evaluate(
     // Each name set is synced on its own: a set origin does not have is
     // `Deleted` (nothing judged, nothing lost), never "unreachable".
     //
-    // holds-until: Phase 4 writes greengate refs. Until then origin has no
-    // greengate ref, so the green fetch fails and costs an `ls-remote`, and the
-    // legacy set is a second fetch: up to twice the calls of 1.8.0.
+    // holds-until: the census (2.0.0) drops the legacy set. Until a
+    // repository's first green note (writers write them since 1.10.0) origin
+    // has no greengate ref, so the green fetch fails and costs an `ls-remote`,
+    // and the legacy set is a second fetch: up to twice the calls of 1.8.0.
     let green_sync = sync_mirrors_of(&root, &GREEN);
     let green = (green_sync.notes, green_sync.inputs);
     let silent = green_sync.origin_silent();
