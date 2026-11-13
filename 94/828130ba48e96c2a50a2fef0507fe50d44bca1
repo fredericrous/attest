@@ -1,0 +1,16 @@
+amont-attest-v2
+tree 515589aaa97257f51782ca98f1a7c89414a23b1f
+gates ci-fmt ci-clippy ci-shellcheck
+platform x86_64-linux
+input ci-fmt 2ab9c1002d4af55f78d3bb56220ceddaba0573bb
+input ci-clippy 21960f1a02a473c69b4491569a616c6fd6bd9dd4
+input ci-shellcheck 6123336e37c3eca4aad1a0fdff3f6ff64b6b148e
+canon 1338b026c5e7b29d680e7eea168593dd8e265094
+amont attest-sign
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgISqqVE8csJZGVEMH5J21/VFM+8
+FMdSDMZZU7cr8UQwUAAAAMYW1vbnQtYXR0ZXN0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz
+aC1lZDI1NTE5AAAAQD35v8mdnARuij1aALpgyIA50iF0WyWldbWez7gUZbyP2mw3W4oI3b
+yEFP3LASOhRaBkXcXlo2GEsJ79WypE6wk=
+-----END SSH SIGNATURE-----
