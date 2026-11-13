@@ -266,9 +266,15 @@ jobs:
           set -eu
           [ '${{ steps.appended.outputs.status }}' = local ] || { echo 'status: ${{ steps.appended.outputs.status }}'; exit 1; }
           tree=$(git rev-parse 'HEAD^{tree}')
-          # Signers write the greengate names since 1.10.0; the `release` leg
-          # runs the pinned binary, which wrote the amont ones before that.
-          if git notes --ref attest-local/greengate-attest show "$tree" > /dev/null 2>&1; then
+          # Every leg but `release` runs this tree's binary or sign.sh, which
+          # write the greengate names: that is required here. Only the
+          # `release` leg runs the pinned 1.9 binary, and it may write the
+          # amont names (the either-name fallback exists for it alone).
+          if [ "${{ matrix.binary }}" != release ]; then
+            git notes --ref attest-local/greengate-attest show "$tree" > /dev/null 2>&1 ||
+              { echo "the ${{ matrix.binary }} leg must write the greengate names"; exit 1; }
+            set_=greengate
+          elif git notes --ref attest-local/greengate-attest show "$tree" > /dev/null 2>&1; then
             set_=greengate
           else
             set_=amont
@@ -358,8 +364,9 @@ jobs:
           set -eu
           [ '${{ steps.fpsign.outputs.inputs }}' = 1/1 ] || { echo 'inputs: ${{ steps.fpsign.outputs.inputs }}'; exit 1; }
           tree=$(git rev-parse 'HEAD^{tree}')
-          { git notes --ref attest-local/greengate-attest show "$tree" 2> /dev/null ||
-            git notes --ref attest-local/amont-attest show "$tree"; } | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
+          # The pinned release leg wrote the amont names; every other leg, the green.
+          if [ "${{ matrix.binary }}" = release ]; then src=amont; else src=greengate; fi
+          git notes --ref "attest-local/$src-attest" show "$tree" | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
           echo unrelated > UNRELATED.md && git add UNRELATED.md && git commit -qm unrelated
       - id: fpmoved
         uses: ./

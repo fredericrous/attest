@@ -76,6 +76,15 @@ for an unpushed block).
   signer must be listed with `namespaces="greengate-attest"` (both, during the
   window) for its new notes to verify: a verifier that cannot verify one runs
   the gate, as for any absent note.
+- **A green note hides its object's legacy blocks.** A note is read whole under
+  one name set, and the green note wins for its object. So a tree signed by both
+  a 1.9 `sign@v1` and a Phase 4 laptop runs its suite until CI also signs green.
+  `v1` therefore moves to 1.10.0 in the same step as the laptop's Phase 4
+  install. Until then the old notes verify as before.
+- **The caret hazard.** A dependent with a caret `1.9` pin resolves 1.10 on any
+  build without `--locked`, or after `cargo update`, and its attest writes switch
+  to green before its own switch. Dependents pin `~1.9` until they take the
+  writer switch, then `1.10`.
 
 ## The note
 
@@ -564,7 +573,9 @@ got an answer: an origin that did not answer (a call for the first set timed
 out, or both its refs are `unreachable`) is not asked again, and the second set
 takes the same state, so a silent origin still costs
 one call and a dead one two, in total; an origin that answers costs up to twice
-the figures above (one pair per set). A set origin does not have is `absent`.
+the figures above, one name set after the other: three calls per set, so about
+6 × the 15 s budget (90 s) in all on a slow but answering origin. A set origin
+does not have is `absent`.
 
 **Unpushed blocks** — written by a producer that did not push, such as
 `sign.sh --no-push` — live in `refs/notes/attest-local/amont-attest` and

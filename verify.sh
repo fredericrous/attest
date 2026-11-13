@@ -222,6 +222,9 @@ fi
 # EMPTY makes it run none of them. Credential managers are told not to
 # interact; their stored credentials still work. Returns 124 when the deadline
 # cut the call off.
+# Per call. A name set costs up to three calls (SPEC.md, origin's mirror), and
+# the two sets run one after the other: about 6 × REMOTE_BUDGET (90 s) in all
+# on a slow but answering origin.
 REMOTE_BUDGET=15
 remote_git() {
     local ssh_cmd=${GIT_SSH_COMMAND:-}
