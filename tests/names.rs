@@ -609,7 +609,6 @@ fn git_attest_sign_no_push_writes_the_green_local_refs() {
     let out = sign_with_cli(&fixture, &["--no-push"]);
     assert!(out.contains("status=local\n"), "{out}");
     let refs = note_refs(&fixture.dir, &fixture.dir.join(".git"));
-    // The inputs one holds the canonical tree's key.
     assert_eq!(
         refs,
         [
@@ -629,6 +628,40 @@ fn git_attest_sign_no_push_writes_the_green_local_refs() {
         ],
     );
     assert!(body.starts_with("greengate-attest-v2\n"), "{body}");
+    // The block's canonical fingerprint is filed under its GREEN key in the
+    // local inputs ref, and under no LEGACY key there.
+    let (payload, _) = format::split_note(&body).unwrap();
+    let canon = format::canon_claim(&payload).expect("a canon line");
+    let green_key = git_attest::fingerprint::canon_key_in(&fixture.dir, &GREEN, canon).unwrap();
+    let legacy_key = git_attest::fingerprint::canon_key_in(&fixture.dir, &LEGACY, canon).unwrap();
+    let inputs = |key: &str| {
+        run(
+            &fixture.dir,
+            "git",
+            &[
+                "notes",
+                "--ref",
+                "attest-local/greengate-attest-inputs",
+                "show",
+                key,
+            ],
+        )
+    };
+    assert!(inputs(&green_key).contains("BEGIN SSH SIGNATURE"));
+    let legacy_present = Command::new("git")
+        .current_dir(&fixture.dir)
+        .args([
+            "notes",
+            "--ref",
+            "attest-local/greengate-attest-inputs",
+            "show",
+            &legacy_key,
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(!legacy_present, "a LEGACY key in the GREEN inputs ref");
 }
 
 /// `notes::sync_mirrors` brings the written set's mirrors in line with origin
@@ -640,8 +673,9 @@ fn sync_mirrors_touches_only_the_green_refs() {
     fixture.attest(&GREEN, "greengate-attest", "g-green");
     fixture.attest(&LEGACY, "amont-attest", "g-legacy");
     let mut loud = Vec::new();
-    let (notes, _) = git_attest::notes::sync_mirrors(&fixture.dir, &mut loud);
+    let (notes, inputs) = git_attest::notes::sync_mirrors(&fixture.dir, &mut loud);
     assert_eq!(notes, git_attest::notes::Mirror::Deleted);
+    assert_eq!(inputs, git_attest::notes::Mirror::Deleted);
     assert_eq!(
         note_refs(&fixture.dir, &fixture.dir.join(".git")),
         ["refs/notes/amont-attest"]

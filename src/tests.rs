@@ -720,22 +720,20 @@ fn payload_gives_every_known_answer() {
         // their shape is the known answer, and since 1.10.0 the header and
         // the producer word are the written (GREEN) set's.
         let captured = all(&lines, "payload");
-        let last = captured.len() - 1;
-        let want: String = captured
-            .iter()
-            .enumerate()
-            .map(|(i, l)| match i {
-                0 => {
-                    assert_eq!(*l, LEGACY.format, "{name}: a LEGACY capture");
-                    format!("{}\n", WRITE.format)
-                }
-                i if i == last => {
-                    let word = l.strip_prefix(&format!("{} ", LEGACY.producer));
-                    format!("{} {}\n", WRITE.producer, word.expect("a producer line"))
-                }
-                _ => format!("{l}\n"),
-            })
-            .collect();
+        let [first, middle @ .., last] = captured.as_slice() else {
+            panic!("{name}: a captured payload has a first and a last line")
+        };
+        assert_eq!(*first, LEGACY.format, "{name}: a LEGACY capture");
+        let word = last.strip_prefix(&format!("{} ", LEGACY.producer));
+        let mut want = format!("{}\n", WRITE.format);
+        for l in middle {
+            want.push_str(&format!("{l}\n"));
+        }
+        want.push_str(&format!(
+            "{} {}\n",
+            WRITE.producer,
+            word.expect("a producer line")
+        ));
         assert_eq!(
             payload(
                 one("tree"),
@@ -810,42 +808,46 @@ fn fingerprint_gives_every_known_answer() {
 fn the_written_keys_are_the_green_known_answers() {
     // Not `hash_repo`: its directories are per process, and the vectors test
     // runs beside this one and removes them.
+    /// A scratch repository, removed when the test ends, pass or fail.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0); // temp dir cleanup
+        }
+    }
     let repo = |format: &str| {
-        let d =
+        let repo_dir =
             std::env::temp_dir().join(format!("git-attest-green-{format}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d); // a leftover of an earlier run
-        std::fs::create_dir_all(&d).unwrap();
+        let _ = std::fs::remove_dir_all(&repo_dir); // a leftover of an earlier run
+        std::fs::create_dir_all(&repo_dir).unwrap();
         let object_format = format!("--object-format={format}");
         assert!(std::process::Command::new("git")
-            .current_dir(&d)
+            .current_dir(&repo_dir)
             .args(["init", "-q", "--template=", &object_format])
             .status()
             .unwrap()
             .success());
-        d
+        Scratch(repo_dir)
     };
     let (s1, s2) = (repo("sha1"), repo("sha256"));
     let one = "1".repeat(40);
-    let a = "a".repeat(64);
+    let sixty_four_hex_a = "a".repeat(64);
     assert_eq!(
-        key(&s1, "test", &one).unwrap(),
+        key(&s1.0, "test", &one).unwrap(),
         "62afe1dcfad5ecad6411bc021491a6059e130d45"
     );
     assert_eq!(
-        canon_key(&s1, &one).unwrap(),
+        canon_key(&s1.0, &one).unwrap(),
         "9d4c3b018b800fd0f63afc83e541eefc6ee7e905"
     );
     assert_eq!(
-        key(&s2, "lint", &a).unwrap(),
+        key(&s2.0, "lint", &sixty_four_hex_a).unwrap(),
         "5aba52156ea22ed73496557efdc57daf8e4a947daa06fec69b8911680b50f1dd"
     );
     assert_eq!(
-        canon_key(&s2, &a).unwrap(),
+        canon_key(&s2.0, &sixty_four_hex_a).unwrap(),
         "6599732f0e8d1386df51a7f390d6677b4095ec8d337da2798b98fbf7c039474e"
     );
-    for d in [s1, s2] {
-        let _ = std::fs::remove_dir_all(d); // temp dir cleanup
-    }
 }
 
 #[test]
