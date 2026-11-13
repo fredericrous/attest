@@ -56,8 +56,8 @@ inputs:
     default: origin
   push:
     description: >-
-      Push refs/notes/amont-attest after signing. `false` appends to the local
-      ref only.
+      Push refs/notes/greengate-attest after signing (refs/notes/amont-attest
+      before 1.10.0). `false` appends to the local ref only.
     required: false
     default: "true"
   allow-dirty:
@@ -68,8 +68,8 @@ inputs:
     default: "false"
   producer:
     description: >-
-      The `amont <name>` line of the payload. Keep it stable across runs — no
-      run id, no timestamp — so a re-run recognises its own block as already
+      The `greengate <name>` line of the payload (`amont <name>` before
+      1.10.0). Keep it stable across runs — no run id, no timestamp — so a re-run recognises its own block as already
       present instead of appending it again.
     required: false
     default: attest-sign

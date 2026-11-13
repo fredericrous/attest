@@ -20,7 +20,8 @@ permissions:
 # so must never skip. The attest step does not run there; its output is then
 # empty, which `|| '[]'` turns into "nothing covered" (fromJSON('') would
 # fail the job). `contents: write` on those jobs
-# is for pushing refs/notes/amont-attest and nothing else; a fork PR gets no
+# is for pushing refs/notes/greengate-attest[-inputs] (amont-attest before
+# 1.10.0) and nothing else; a fork PR gets no
 # secret and a read-only token, and the sign step reports and succeeds.
 jobs:
   lint:
@@ -194,12 +195,14 @@ jobs:
             echo 'expected legacy_notes=absent, got ${{ steps.bare.outputs.legacy_notes }}'; exit 1; }
 
       # 2. Mint a real attestation over the tree this job checked out, and
-      #    prove the action finds, verifies and reports it.
+      #    prove the action finds, verifies and reports it. It is a LEGACY
+      #    (`amont-attest`) note, as 1.9 and earlier signed: still read during
+      #    the window.
       - name: sign this exact tree by hand
         run: |
           set -eu
           ssh-keygen -q -t ed25519 -N '' -C ci@example.org -f "$RUNNER_TEMP/k"
-          printf '%s namespaces="amont-attest" %s\n' ci@example.org "$(cat "$RUNNER_TEMP/k.pub")" \
+          printf '%s namespaces="amont-attest,greengate-attest" %s\n' ci@example.org "$(cat "$RUNNER_TEMP/k.pub")" \
             > "$RUNNER_TEMP/ci-signers"
           tree=$(git rev-parse 'HEAD^{tree}')
           printf 'amont-attest-v2\ntree %s\ngates pre-push-cargo-test pre-push-clippy\nplatform x86_64-linux\namont ci\n' \
@@ -263,10 +266,28 @@ jobs:
           set -eu
           [ '${{ steps.appended.outputs.status }}' = local ] || { echo 'status: ${{ steps.appended.outputs.status }}'; exit 1; }
           tree=$(git rev-parse 'HEAD^{tree}')
-          n=$(git notes --ref attest-local/amont-attest show "$tree" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
+          # Signers write the greengate names since 1.10.0; the `release` leg
+          # runs the pinned binary, which wrote the amont ones before that.
+          if git notes --ref attest-local/greengate-attest show "$tree" > /dev/null 2>&1; then
+            set_=greengate
+          else
+            set_=amont
+          fi
+          n=$(git notes --ref "attest-local/$set_-attest" show "$tree" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
           [ "$n" = 1 ] || { echo "expected 1 unpushed block, got $n"; exit 1; }
           n=$(git notes --ref amont-attest show "$tree" | grep -c '^-----BEGIN SSH SIGNATURE-----$')
           [ "$n" = 1 ] || { echo "expected 1 block in the mirror, got $n"; exit 1; }
+          # A note is read whole under one name set, and the green one wins:
+          # for the verifier to read both blocks, the hand-written one is
+          # re-signed under the set the signer wrote, on origin too.
+          if [ "$set_" = greengate ]; then
+            sed -e '1s/^amont-attest-v2$/greengate-attest-v2/' -e 's/^amont ci$/greengate ci/' \
+              "$RUNNER_TEMP/p" > "$RUNNER_TEMP/pg"
+            ssh-keygen -Y sign -n greengate-attest -f "$RUNNER_TEMP/k" "$RUNNER_TEMP/pg"
+            git notes --ref greengate-attest add -f \
+              -m "$(printf '%s\n\n%s' "$(cat "$RUNNER_TEMP/pg")" "$(cat "$RUNNER_TEMP/pg.sig")")" "$tree"
+            git push -q -f origin refs/notes/greengate-attest:refs/notes/greengate-attest
+          fi
       - id: strict
         uses: ./
         with:
@@ -305,8 +326,8 @@ jobs:
           # Without include-local the unpushed block is not read at all.
           [ '${{ steps.nolocal.outputs.gates }}' = '["pre-push-cargo-test","pre-push-clippy"]' ] || {
             echo 'no include-local: ${{ steps.nolocal.outputs.gates }}'; exit 1; }
-          # Signers write the amont ref until Phase 4, so its state is
-          # legacy_notes; the pinned 1.8.0 (`release` leg) still calls it notes.
+          # The hand-written amont note is on origin in every leg, so its
+          # state is legacy_notes=fetched (a pre-1.9 binary calls it notes).
           [ '${{ steps.nolocal.outputs.legacy_notes || steps.nolocal.outputs.notes }}' = fetched ] || {
             echo 'legacy_notes: ${{ steps.nolocal.outputs.legacy_notes }}, notes: ${{ steps.nolocal.outputs.notes }}'; exit 1; }
 
@@ -318,6 +339,7 @@ jobs:
       - id: readkey2
         run: |
           set -eu
+          git notes --ref attest-local/greengate-attest remove "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true
           git notes --ref attest-local/amont-attest remove "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true
           {
             echo 'key<<ATTEST_EOF'
@@ -335,7 +357,9 @@ jobs:
         run: |
           set -eu
           [ '${{ steps.fpsign.outputs.inputs }}' = 1/1 ] || { echo 'inputs: ${{ steps.fpsign.outputs.inputs }}'; exit 1; }
-          git notes --ref attest-local/amont-attest show "$(git rev-parse 'HEAD^{tree}')" | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
+          tree=$(git rev-parse 'HEAD^{tree}')
+          { git notes --ref attest-local/greengate-attest show "$tree" 2> /dev/null ||
+            git notes --ref attest-local/amont-attest show "$tree"; } | grep -q '^input ci-fmt [0-9a-f]\{40,64\}$'
           echo unrelated > UNRELATED.md && git add UNRELATED.md && git commit -qm unrelated
       - id: fpmoved
         uses: ./
@@ -359,9 +383,13 @@ jobs:
           set -eu
           [ '${{ steps.fpinput.outputs.gates }}' = '[]' ] || { echo 'got: ${{ steps.fpinput.outputs.gates }}'; exit 1; }
           # Back to the original tree, and without the fingerprint-keyed
-          # block: the steps below reason about the tree key alone.
+          # block or the greengate copy of the hand-written note: the steps
+          # below reason about the amont tree note alone.
           git reset -q --hard HEAD~2
+          git update-ref -d refs/notes/attest-local/greengate-attest-inputs
           git update-ref -d refs/notes/attest-local/amont-attest-inputs
+          git push -q origin :refs/notes/greengate-attest 2> /dev/null || true
+          git update-ref -d refs/notes/greengate-attest
 
       # 6. The substring bug this project exists to fix. `pre-push-cargo-test`
       #    is a substring of the covered `…-slow`, so the old string form would

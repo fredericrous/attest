@@ -21,9 +21,9 @@ git-attest sign — attest the gates that just passed on the tree checked out he
                   [--producer NAME] [--attempts N] [--no-push] [--allow-dirty]
                   [--github-output] [--quiet]        < private-key
 
-  Signs an amont-attest-v2 block over HEAD's tree, APPENDS it to the note on
-  that tree in refs/notes/amont-attest, and pushes the ref. With --no-push the
-  block goes to refs/notes/attest-local/amont-attest instead.
+  Signs a greengate-attest-v2 block over HEAD's tree, APPENDS it to the note
+  on that tree in refs/notes/greengate-attest, and pushes the ref. With
+  --no-push the block goes to refs/notes/attest-local/greengate-attest instead.
 
   The private key arrives on STDIN and nowhere else, never argv. ed25519 only.
 

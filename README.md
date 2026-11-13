@@ -70,8 +70,12 @@ git config --global greengate.attest true
 `.forgejo/allowed_signers`), pinned to the namespace:
 
 ```
-you@example.com namespaces="amont-attest" ssh-ed25519 AAAAC3Nza…
+you@example.com namespaces="amont-attest,greengate-attest" ssh-ed25519 AAAAC3Nza…
 ```
+
+> Since 1.10.0 signers write the `greengate-attest` namespace; `amont-attest`
+> stays listed while older notes and older producers are still around (the
+> 30-day window, SPEC.md "Names"), and goes at 2.0.0.
 
 > Use **your real address**, the one in the note's principal column. The
 > verifier reads the signer's identity from the signature itself, so a file
@@ -193,7 +197,7 @@ Setup, once:
 ```sh
 ssh-keygen -t ed25519 -N '' -C ci@example.invalid -f attest-ci
 gh secret set ATTEST_SIGNING_KEY < attest-ci
-printf '%s namespaces="amont-attest" %s\n' ci@example.invalid "$(cat attest-ci.pub)" >> .github/allowed_signers
+printf '%s namespaces="amont-attest,greengate-attest" %s\n' ci@example.invalid "$(cat attest-ci.pub)" >> .github/allowed_signers
 rm attest-ci
 ```
 
@@ -213,7 +217,7 @@ Then the trailing step shown at the top, with three rules that keep it honest:
 
 Fork pull requests get no secret and a read-only token; both paths just report
 and succeed. With `push: false` the block stays on the runner, in
-`refs/notes/attest-local/amont-attest`, and the verifier reads it only with
+`refs/notes/attest-local/greengate-attest`, and the verifier reads it only with
 `include-local: true`: origin never saw it, so origin cannot revoke it.
 
 **Origin is the source of truth.** The verifier treats the local notes refs as
@@ -237,7 +241,7 @@ conviction: trust what was verified, never what was reported.
 
 | | |
 |---|---|
-| [`SPEC.md`](SPEC.md) | the `amont-attest-v2` wire format, input fingerprints included |
+| [`SPEC.md`](SPEC.md) | the `greengate-attest-v2` (formerly `amont-attest-v2`) wire format, input fingerprints included |
 | [`action.yml`](action.yml) | the composite action, for GitHub **and** Forgejo: runs `git-attest covered` |
 | [`sign/`](sign/) | the CI producer: `sign/action.yml` runs `git-attest sign` |
 | [`RELEASE`](RELEASE) | the `git-attest` release both actions run, and each archive's sha256 |

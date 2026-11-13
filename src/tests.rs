@@ -249,8 +249,14 @@ fn input_lines_need_exactly_three_fields_and_a_real_oid() {
 
 #[test]
 fn key_preimage_is_exact() {
+    // What is written: the GREEN domain since 1.10.0.
     assert_eq!(
         key_preimage("ci-fmt", "abc"),
+        "greengate-attest-input ci-fmt abc\n"
+    );
+    // What a LEGACY note was filed under, still read.
+    assert_eq!(
+        key_preimage_in(&LEGACY, "ci-fmt", "abc"),
         "amont-attest-input ci-fmt abc\n"
     );
 }
@@ -429,7 +435,14 @@ fn a_canon_claim_is_two_fields_and_a_real_oid() {
     assert_eq!(canon_claim("canon\n"), None);
     // first occurrence wins
     assert_eq!(canon_claim(&format!("canon {O1}\ncanon {O2}\n")), Some(O1));
-    assert_eq!(canon_key_preimage(O1), format!("amont-attest-canon {O1}\n"));
+    assert_eq!(
+        canon_key_preimage(O1),
+        format!("greengate-attest-canon {O1}\n")
+    );
+    assert_eq!(
+        canon_key_preimage_in(&LEGACY, O1),
+        format!("amont-attest-canon {O1}\n")
+    );
 }
 
 #[test]
@@ -445,11 +458,11 @@ fn a_payload_has_the_spec_shape_and_a_block_one_blank_line() {
     );
     assert_eq!(
         p,
-        format!("amont-attest-v2\ntree t0\ngates lint test\nplatform x86_64-linux\ninput lint {O1}\ncanon {O2}\namont attest-sign\n")
+        format!("greengate-attest-v2\ntree t0\ngates lint test\nplatform x86_64-linux\ninput lint {O1}\ncanon {O2}\ngreengate attest-sign\n")
     );
     assert_eq!(
         payload("t", "g", "p", &[], None, "x"),
-        "amont-attest-v2\ntree t\ngates g\nplatform p\namont x\n"
+        "greengate-attest-v2\ntree t\ngates g\nplatform p\ngreengate x\n"
     );
     let b = crate::format::block(&p, &format!("{SIG}\n"));
     let (back, sig) = split_note(&b).unwrap();
@@ -703,9 +716,25 @@ fn payload_gives_every_known_answer() {
             })
             .collect();
         let canon = all(&lines, "canon");
-        let want: String = all(&lines, "payload")
+        // The cases are LEGACY payloads captured from released producers:
+        // their shape is the known answer, and since 1.10.0 the header and
+        // the producer word are the written (GREEN) set's.
+        let captured = all(&lines, "payload");
+        let last = captured.len() - 1;
+        let want: String = captured
             .iter()
-            .map(|l| format!("{l}\n"))
+            .enumerate()
+            .map(|(i, l)| match i {
+                0 => {
+                    assert_eq!(*l, LEGACY.format, "{name}: a LEGACY capture");
+                    format!("{}\n", WRITE.format)
+                }
+                i if i == last => {
+                    let word = l.strip_prefix(&format!("{} ", LEGACY.producer));
+                    format!("{} {}\n", WRITE.producer, word.expect("a producer line"))
+                }
+                _ => format!("{l}\n"),
+            })
             .collect();
         assert_eq!(
             payload(
@@ -762,14 +791,60 @@ fn fingerprint_gives_every_known_answer() {
         let a: Vec<&str> = args.split(' ').collect();
         let got = match word.as_str() {
             "implicit" => implicit_inputs(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
-            "key" => vec![key(repo(a[0]), a[1], a[2]).unwrap()],
-            "canon-key" => vec![canon_key(repo(a[0]), a[1]).unwrap()],
+            // The file's keys are the LEGACY domains' (captured before
+            // 1.10.0, never edited); the GREEN ones are below.
+            "key" => vec![key_in(repo(a[0]), &LEGACY, a[1], a[2]).unwrap()],
+            "canon-key" => vec![canon_key_in(repo(a[0]), &LEGACY, a[1]).unwrap()],
             other => panic!("{name}: a case opens with implicit, key or canon-key, not {other}"),
         };
         assert_eq!(got, out, "{name}");
     }
     for (_, d) in &repos {
         let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// The keys written since 1.10.0, under the GREEN domains, computed with `git
+/// hash-object --stdin` over SPEC's preimage outside any implementation.
+#[test]
+fn the_written_keys_are_the_green_known_answers() {
+    // Not `hash_repo`: its directories are per process, and the vectors test
+    // runs beside this one and removes them.
+    let repo = |format: &str| {
+        let d =
+            std::env::temp_dir().join(format!("git-attest-green-{format}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d); // a leftover of an earlier run
+        std::fs::create_dir_all(&d).unwrap();
+        let object_format = format!("--object-format={format}");
+        assert!(std::process::Command::new("git")
+            .current_dir(&d)
+            .args(["init", "-q", "--template=", &object_format])
+            .status()
+            .unwrap()
+            .success());
+        d
+    };
+    let (s1, s2) = (repo("sha1"), repo("sha256"));
+    let one = "1".repeat(40);
+    let a = "a".repeat(64);
+    assert_eq!(
+        key(&s1, "test", &one).unwrap(),
+        "62afe1dcfad5ecad6411bc021491a6059e130d45"
+    );
+    assert_eq!(
+        canon_key(&s1, &one).unwrap(),
+        "9d4c3b018b800fd0f63afc83e541eefc6ee7e905"
+    );
+    assert_eq!(
+        key(&s2, "lint", &a).unwrap(),
+        "5aba52156ea22ed73496557efdc57daf8e4a947daa06fec69b8911680b50f1dd"
+    );
+    assert_eq!(
+        canon_key(&s2, &a).unwrap(),
+        "6599732f0e8d1386df51a7f390d6677b4095ec8d337da2798b98fbf7c039474e"
+    );
+    for d in [s1, s2] {
+        let _ = std::fs::remove_dir_all(d); // temp dir cleanup
     }
 }
 

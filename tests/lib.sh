@@ -297,8 +297,8 @@ with_canon() { # canon-oid
 }
 
 # The synthetic note key for a canonical fingerprint.
-canon_key() { # dir canon
-    printf 'amont-attest-canon %s\n' "$2" | git -C "$1" hash-object --stdin
+canon_key() { # dir canon [domain]
+    printf '%s %s\n' "${3:-amont-attest-canon}" "$2" | git -C "$1" hash-object --stdin
 }
 
 # A signed block APPENDED under Kc(canon) in the inputs ref.

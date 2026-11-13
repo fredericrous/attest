@@ -184,21 +184,19 @@ fn gates(ids: &[&str]) -> Vec<String> {
 
 const BOTH: &str = "amont-attest,greengate-attest";
 
-/// Phase 1 must not let a dependent sign new names early: greengate signs with
-/// these constants and links this crate by a caret pin.
+/// Since 1.10.0 writers write the GREEN names: greengate signs with these
+/// constants, and `git-attest sign` and `sign.sh` with the same set.
 #[test]
-fn the_constants_still_equal_the_legacy_names() {
-    assert_eq!(format::FORMAT, LEGACY.format);
-    assert_eq!(format::NOTES_REF, LEGACY.notes_ref);
-    assert_eq!(format::INPUTS_REF, LEGACY.inputs_ref);
-    assert_eq!(format::NAMESPACE, LEGACY.namespace);
-    assert_ne!(format::FORMAT, GREEN.format);
-    assert_ne!(format::NAMESPACE, GREEN.namespace);
-    assert_eq!(WRITE, LEGACY);
+fn the_constants_are_the_green_names() {
+    assert_eq!(format::FORMAT, "greengate-attest-v2");
+    assert_eq!(format::NOTES_REF, "greengate-attest");
+    assert_eq!(format::INPUTS_REF, "greengate-attest-inputs");
+    assert_eq!(format::NAMESPACE, "greengate-attest");
+    assert_eq!(WRITE, GREEN);
 }
 
-/// Everything written derives from `WRITE`, so Phase 4 is one line: the
-/// set-less keys and the payload's producer word included.
+/// Everything written derives from `WRITE`: the set-less keys and the
+/// payload's producer word included.
 #[test]
 fn every_written_name_derives_from_write() {
     use git_attest::fingerprint::{canon_key, canon_key_in, key, key_in};
@@ -248,14 +246,22 @@ fn each_set_keys_its_lookups_under_its_own_domain() {
         canon_key_preimage_in(&GREEN, "abc"),
         "greengate-attest-canon abc\n"
     );
-    // The old signatures keep meaning LEGACY.
+    assert_eq!(
+        key_preimage_in(&LEGACY, "ci-fmt", "abc"),
+        "amont-attest-input ci-fmt abc\n"
+    );
+    assert_eq!(
+        canon_key_preimage_in(&LEGACY, "abc"),
+        "amont-attest-canon abc\n"
+    );
+    // The set-less forms are the written set's, GREEN since 1.10.0.
     assert_eq!(
         key_preimage("ci-fmt", "abc"),
-        key_preimage_in(&LEGACY, "ci-fmt", "abc")
+        key_preimage_in(&GREEN, "ci-fmt", "abc")
     );
     assert_eq!(
         canon_key_preimage("abc"),
-        canon_key_preimage_in(&LEGACY, "abc")
+        canon_key_preimage_in(&GREEN, "abc")
     );
 }
 
@@ -452,4 +458,192 @@ fn a_local_mirror_origin_does_not_have_is_not_judged() {
     fixture.attest(&GREEN, "greengate-attest", "g-green");
     // Nothing published: origin has neither ref, so the local mirror is deleted.
     assert!(fixture.covered().is_empty());
+}
+
+/// The note refs of `git_dir` (a work tree or a bare repository), sorted.
+fn note_refs(dir: &Path, git_dir: &Path) -> Vec<String> {
+    let git_dir = git_dir.to_str().unwrap();
+    let out = run(
+        dir,
+        "git",
+        &[
+            "--git-dir",
+            git_dir,
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/notes/",
+        ],
+    );
+    let mut refs: Vec<String> = out.lines().map(str::to_string).collect();
+    refs.sort();
+    refs
+}
+
+/// `git-attest sign` run in the fixture with its key on stdin, under a HOME
+/// and a git config of its own. Returns its stdout.
+fn sign_with_cli(fixture: &Fixture, extra: &[&str]) -> String {
+    use std::io::Write;
+    let mut args = vec![
+        "sign",
+        "--gates",
+        "g1",
+        "--platform",
+        "x86_64-linux",
+        "--allow-dirty",
+        "--github-output",
+    ];
+    args.extend_from_slice(extra);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_git-attest"))
+        .current_dir(&fixture.dir)
+        .args(&args)
+        .env("HOME", &fixture.dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let key = std::fs::read(fixture.dir.join("key")).unwrap();
+    child.stdin.take().unwrap().write_all(&key).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git-attest sign: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A spec declaring `g1`'s inputs, committed, so a signed block carries an
+/// `input` line and is filed in the inputs ref too.
+fn commit_spec(fixture: &Fixture) {
+    std::fs::create_dir_all(fixture.dir.join(".github")).unwrap();
+    std::fs::write(fixture.dir.join(".github/attest-inputs"), "g1 file.txt\n").unwrap();
+    run(&fixture.dir, "git", &["add", ".github/attest-inputs"]);
+    run(
+        &fixture.dir,
+        "git",
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "spec",
+        ],
+    );
+}
+
+/// `git-attest sign` writes the GREEN set and nothing else: the header, the
+/// producer word, both refs on origin, the inputs key under the GREEN domain,
+/// a signature that verifies under `-n greengate-attest` alone. Before 1.10.0
+/// every assertion here named `amont-attest`.
+#[test]
+fn git_attest_sign_writes_only_the_green_names() {
+    let mut fixture = Fixture::with_origin("sign-green", "greengate-attest");
+    commit_spec(&fixture);
+    fixture.tree = run(&fixture.dir, "git", &["rev-parse", "HEAD^{tree}"]);
+    let out = sign_with_cli(&fixture, &[]);
+    assert!(out.contains("status=pushed\n"), "{out}");
+
+    let origin = fixture.origin.clone().unwrap();
+    assert_eq!(
+        note_refs(&fixture.dir, &origin),
+        [
+            "refs/notes/greengate-attest",
+            "refs/notes/greengate-attest-inputs"
+        ]
+    );
+    let origin_dir = origin.to_str().unwrap();
+    let body = run(
+        &fixture.dir,
+        "git",
+        &[
+            "--git-dir",
+            origin_dir,
+            "notes",
+            "--ref",
+            "greengate-attest",
+            "show",
+            &fixture.tree,
+        ],
+    );
+    let (payload, _) = format::split_note(&body).unwrap();
+    assert!(payload.starts_with("greengate-attest-v2\n"), "{payload}");
+    assert!(payload.ends_with("\ngreengate attest-sign\n"), "{payload}");
+
+    // The inputs note sits under the GREEN key of the fingerprint it claims.
+    let fp = format::input_fp(&payload, "g1").expect("an input line");
+    let k = git_attest::fingerprint::key_in(&fixture.dir, &GREEN, "g1", fp).unwrap();
+    run(
+        &fixture.dir,
+        "git",
+        &[
+            "--git-dir",
+            origin_dir,
+            "notes",
+            "--ref",
+            "greengate-attest-inputs",
+            "show",
+            &k,
+        ],
+    );
+
+    // The signers file lists greengate-attest alone, so only a GREEN
+    // signature verifies, and the verifier says which set it went through.
+    let verdict = fixture.verdict();
+    assert_eq!(verdict.gates, gates(&["g1"]));
+    assert_eq!(verdict.verified_under, ["greengate-attest"]);
+}
+
+/// `--no-push` keeps the block under the GREEN local ref.
+#[test]
+fn git_attest_sign_no_push_writes_the_green_local_refs() {
+    let fixture = Fixture::with_origin("sign-local", "greengate-attest");
+    let out = sign_with_cli(&fixture, &["--no-push"]);
+    assert!(out.contains("status=local\n"), "{out}");
+    let refs = note_refs(&fixture.dir, &fixture.dir.join(".git"));
+    // The inputs one holds the canonical tree's key.
+    assert_eq!(
+        refs,
+        [
+            "refs/notes/attest-local/greengate-attest",
+            "refs/notes/attest-local/greengate-attest-inputs"
+        ]
+    );
+    let body = run(
+        &fixture.dir,
+        "git",
+        &[
+            "notes",
+            "--ref",
+            "attest-local/greengate-attest",
+            "show",
+            &fixture.tree,
+        ],
+    );
+    assert!(body.starts_with("greengate-attest-v2\n"), "{body}");
+}
+
+/// `notes::sync_mirrors` brings the written set's mirrors in line with origin
+/// and leaves the other set's alone: an origin with neither deletes the GREEN
+/// mirror and keeps the LEGACY one.
+#[test]
+fn sync_mirrors_touches_only_the_green_refs() {
+    let fixture = Fixture::with_origin("sync", BOTH);
+    fixture.attest(&GREEN, "greengate-attest", "g-green");
+    fixture.attest(&LEGACY, "amont-attest", "g-legacy");
+    let mut loud = Vec::new();
+    let (notes, _) = git_attest::notes::sync_mirrors(&fixture.dir, &mut loud);
+    assert_eq!(notes, git_attest::notes::Mirror::Deleted);
+    assert_eq!(
+        note_refs(&fixture.dir, &fixture.dir.join(".git")),
+        ["refs/notes/amont-attest"]
+    );
 }

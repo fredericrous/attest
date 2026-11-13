@@ -1,7 +1,8 @@
 //! What a producer signs: for some gates that passed on a tree, the payload
-//! and every key it is filed under (SPEC.md, "Producing"). amont at pre-push
-//! and `git-attest sign` in CI build their blocks here, so both sign the same
-//! bytes for the same tree.
+//! and every key it is filed under (SPEC.md, "Producing"), under the written
+//! names ([`crate::format::WRITE`]). greengate at pre-push and `git-attest
+//! sign` in CI build their blocks here, so both sign the same bytes for the
+//! same tree.
 
 use std::path::Path;
 

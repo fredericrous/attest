@@ -171,7 +171,7 @@ impl Synced {
 
 /// [`sync_mirrors`] for one name set's two refs. A verifier syncs each set on
 /// its own, so a set origin does not have (the old one after the census, the
-/// new one before the writers switch) is `Deleted`, which judges nothing and
+/// new one before a repository's first green note) is `Deleted`, which judges nothing and
 /// changes no verdict, never `Unreachable`.
 pub fn sync_mirrors_of(root: &Path, names: &Names) -> Synced {
     // Every line this sync has to say goes into `loud`, returned with the

@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **Writers switch to the `greengate-attest` names** (decisions ADR-0068,
+  plan greengate-signs-notes-under-green-names, Phase 4). `format::WRITE` is
+  now `format::GREEN`, so `FORMAT`, `NOTES_REF`, `INPUTS_REF`, `NAMESPACE`,
+  `payload`'s producer word, `fingerprint::key` / `canon_key` and their
+  preimages, and `notes::sync_mirrors` give the green names. `git-attest
+  sign`, `sign/sign.sh` (and the `./sign` action) and every dependent that
+  signs with these constants write a `greengate-attest-v2` block with a
+  `greengate <producer>` line, signed `-n greengate-attest`, into
+  `refs/notes/greengate-attest` and `refs/notes/greengate-attest-inputs`
+  under the green key domains; `--no-push` keeps it in
+  `refs/notes/attest-local/greengate-attest[-inputs]`. Nothing writes an
+  `amont-attest` note any more.
+- **What an upgrader sees.** Verifying is unchanged: both name sets are read
+  (green first) until 2.0.0, so `amont-attest` notes signed by 1.9 and
+  earlier keep skipping during the 30-day window. A signer's
+  `allowed_signers` line must list `greengate-attest`
+  (`namespaces="amont-attest,greengate-attest"` during the window), or its
+  new notes do not verify and the gates run. Verifiers before 1.9.0 read
+  only `refs/notes/amont-attest`, so they do not see new notes and run
+  everything. After signing, a workflow reads the new notes' state as
+  `notes` / `inputs_notes` (not `legacy_notes`), and an inspection of the
+  unpushed block reads `refs/notes/attest-local/greengate-attest`.
+- `sign/sign.sh` names its whole set in one block at the top (header, refs,
+  namespace, both key domains, producer word); the canonical-key function it
+  shares with `verify.sh` now takes the domain of the set in force.
+- `tests/compat/sign-1.9.0.sh` is the 1.9.0 signer; `tests/sign.sh` proves a
+  block it signs is still covered.
+
 ## 1.9.0
 
 - **Verifiers read both note names** (decisions ADR-0068, plan
