@@ -1,0 +1,15 @@
+amont-attest-v2
+tree 515589aaa97257f51782ca98f1a7c89414a23b1f
+gates pre-push-cargo-test ci-conformance
+platform x86_64-linux
+input pre-push-cargo-test 21960f1a02a473c69b4491569a616c6fd6bd9dd4
+input ci-conformance a841abc628b5d43cbe4924d7460a82f01db53cd2
+canon 1338b026c5e7b29d680e7eea168593dd8e265094
+amont attest-sign
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgISqqVE8csJZGVEMH5J21/VFM+8
+FMdSDMZZU7cr8UQwUAAAAMYW1vbnQtYXR0ZXN0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz
+aC1lZDI1NTE5AAAAQFdSJU2t4M1Zt60iJ8Bgql/9kyoj/XZ32cjo+lanhe3XMUQZevcCBl
+OKv78s+J87SXofCEoqKldo4M8hDgtZeAM=
+-----END SSH SIGNATURE-----
