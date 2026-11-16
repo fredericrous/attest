@@ -109,3 +109,20 @@ FMdSDMZZU7cr8UQwUAAAAQZ3JlZW5nYXRlLWF0dGVzdAAAAAAAAAAGc2hhNTEyAAAAUwAA
 AAtzc2gtZWQyNTUxOQAAAECmbkbp2tX/Mu3K+uxB6DqIe3Qmw4mtBmZOKw21ak+UgRHRbP
 KAg5vXfoZuTnt/O99X4NKUiwvZ6hTtJlwEJagE
 -----END SSH SIGNATURE-----
+
+greengate-attest-v2
+tree ab48c0f8221f81dedcac381ffe9dacedb6d3c45d
+gates ci-fmt ci-clippy ci-shellcheck
+platform x86_64-linux
+input ci-fmt 2d19af9b2b8cca85f5c999d705a97ab8f8d9f61a
+input ci-clippy 07939441d9f5fd82f2aa2b39dcaebaf9d15ff975
+input ci-shellcheck 6123336e37c3eca4aad1a0fdff3f6ff64b6b148e
+canon d73f40a0c8fd164ff05c558405424c5446c7714f
+greengate attest-sign
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgISqqVE8csJZGVEMH5J21/VFM+8
+FMdSDMZZU7cr8UQwUAAAAQZ3JlZW5nYXRlLWF0dGVzdAAAAAAAAAAGc2hhNTEyAAAAUwAA
+AAtzc2gtZWQyNTUxOQAAAEBDtQVaABxseBANbLCVmuSgdt24On0nZ3TxGbp/smehrj1T4a
+Q7yjFWr1p8OZ+eeVKUCuYB7Am9i7emsHzbEfID
+-----END SSH SIGNATURE-----
