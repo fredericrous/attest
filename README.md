@@ -1,5 +1,11 @@
 # attest
 
+> **This repository has moved.** git-attest is now **greensummit**, at
+> [greenharness/greensummit](https://github.com/greenharness/greensummit)
+> (crate `greensummit`, Action `greenharness/greensummit@v2`). This repository
+> is archived; `fredericrous/attest@v1` keeps resolving but gets no updates,
+> and greensummit 2.0.0 does not read notes written under the old names.
+
 **Your laptop already ran the tests. Stop paying CI to run them again.**
 
 When a pre-push hook runs your test suite, that result is thrown away the
